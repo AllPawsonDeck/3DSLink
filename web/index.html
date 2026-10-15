@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>3DSLink</title>
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#fff;font-family:Arial,sans-serif}body{display:flex;align-items:center;justify-content:center}.app{width:min(920px,96vw);padding:18px}.toolbar{display:flex;gap:8px;justify-content:center;margin-bottom:14px;flex-wrap:wrap}button{border:0;border-radius:9px;padding:9px 13px;background:#2b2b2b;color:#fff;cursor:pointer}button:hover{background:#3b3b3b}.shell{margin:auto;width:min(760px,94vw)}.half{background:#b21f2d;border-radius:24px;padding:24px;box-shadow:0 10px 30px #0008}.hinge{height:18px;width:78%;margin:auto;background:#6f111b;border-radius:8px}.screen{display:block;background:#000;margin:auto;image-rendering:auto}.top{width:100%;aspect-ratio:400/240}.bottom{width:78%;aspect-ratio:320/240}.clean .half{background:transparent;padding:8px;box-shadow:none}.clean .hinge{display:none}.clean .bottom{width:80%}.toponly .bottomhalf,.toponly .hinge{display:none}.toponly .tophalf{background:transparent;padding:0;box-shadow:none}.toponly .top{width:100%;max-height:94vh}.popcontrols{display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap}.status{text-align:center;margin-top:10px;color:#bbb;font-size:13px}body.popout .toolbar,body.popout .popcontrols,body.popout .hinge,body.popout .status{display:none}body.popout .app{width:100%;height:100%;padding:0}body.popout .shell{width:100%;height:100%}body.popout .half{background:transparent;padding:0;box-shadow:none;border-radius:0}body.popout .screen{width:100%;height:100%;object-fit:contain}body.popout .bottomhalf{display:none}body.popout.bottom .tophalf{display:none}body.popout.bottom .bottomhalf{display:block;width:100%;height:100%}body.popout.both .tophalf,body.popout.both .bottomhalf{display:flex;height:50%}body.popout.both .screen{max-height:100%}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#fff;font-family:Arial,sans-serif}body{display:flex;align-items:center;justify-content:center}.app{width:min(920px,96vw);padding:18px}.toolbar,.popcontrols{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.toolbar{margin-bottom:14px}.popcontrols{margin-top:14px}button{border:0;border-radius:9px;padding:9px 13px;background:#2b2b2b;color:#fff;cursor:pointer}button:hover{background:#3b3b3b}.shell{margin:auto;width:min(760px,94vw)}.half{background:#b21f2d;border-radius:24px;padding:24px;box-shadow:0 10px 30px #0008}.hinge{height:18px;width:78%;margin:auto;background:#6f111b;border-radius:8px}.screen{display:block;background:#000;margin:auto;image-rendering:auto}.top{width:100%;aspect-ratio:400/240}.bottom{width:78%;aspect-ratio:320/240}.clean .half{background:transparent;padding:8px;box-shadow:none}.clean .hinge{display:none}.clean .bottom{width:80%}.toponly .bottomhalf,.toponly .hinge{display:none}.toponly .tophalf{background:transparent;padding:0;box-shadow:none}.toponly .top{width:100%;max-height:94vh}.status{text-align:center;margin-top:10px;color:#aaa;font-size:13px}
 </style>
 </head>
 <body>
@@ -20,12 +20,51 @@
   <div id="status" class="status">Connecting to 3DS…</div>
 </div>
 <script>
-const params=new URLSearchParams(location.search),popMode=params.get('pop');if(popMode){document.body.classList.add('popout',popMode);if(popMode==='top')document.body.classList.add('toponly')}
 function setMode(mode){const s=document.getElementById('shell');s.className='shell';if(mode!=='shell')s.classList.add(mode)}
-function pop(which){const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520;window.open(location.pathname+'?pop='+which,'3DSLink-'+which,`popup=yes,width=${w},height=${h}`)}
-const topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');const topCtx=topCanvas.getContext('2d'),bottomCtx=bottomCanvas.getContext('2d');let packets=0,last=performance.now();
-function drawStrip(screen,part,parts,blob){createImageBitmap(blob).then(img=>{const ctx=screen===0?topCtx:bottomCtx,canvas=screen===0?topCanvas:bottomCanvas,stripW=canvas.width/parts,x=part*stripW;ctx.save();ctx.translate(x+stripW,0);ctx.rotate(Math.PI/2);ctx.drawImage(img,0,0,240,stripW);ctx.restore();img.close();packets++;const now=performance.now();if(now-last>1000){document.getElementById('status').textContent=`Live • ${packets} strips/s`;packets=0;last=now}}).catch(()=>{})}
-async function start(){try{const res=await fetch('/stream',{cache:'no-store'});if(!res.ok||!res.body)throw new Error('stream');document.getElementById('status').textContent='Live';const r=res.body.getReader();let buf=new Uint8Array(0);for(;;){const {value,done}=await r.read();if(done)throw new Error('closed');const n=new Uint8Array(buf.length+value.length);n.set(buf);n.set(value,buf.length);buf=n;for(;;){if(buf.length<12)break;if(buf[0]!==0x33||buf[1]!==0x44||buf[2]!==0x53||buf[3]!==0x4c){buf=buf.slice(1);continue}const screen=buf[4],part=buf[5],parts=buf[6],len=((buf[8]<<24)>>>0)|(buf[9]<<16)|(buf[10]<<8)|buf[11];if(buf.length<12+len)break;const jpg=buf.slice(12,12+len);buf=buf.slice(12+len);drawStrip(screen,part,parts,new Blob([jpg],{type:'image/jpeg'}))}}}catch(e){document.getElementById('status').textContent='Disconnected — retrying…';setTimeout(start,1200)}}start();
+
+const popups=[];
+function pop(which){
+  const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520;
+  const p=window.open('about:blank','3DSLink-'+which,`popup=yes,width=${w},height=${h}`);
+  if(!p)return;
+  const showTop=which!=='bottom',showBottom=which!=='top';
+  p.document.open();
+  p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0}canvas{display:block;background:#000;max-width:100%;object-fit:contain;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${showTop?'<canvas id="pt" width="400" height="240"></canvas>':''}${showBottom?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;createImageBitmap(new Blob([j],{type:'image/jpeg'})).then(i=>{const x=c.getContext('2d'),sw=c.width/n,dx=p*sw;x.save();x.translate(dx+sw,0);x.rotate(Math.PI/2);x.drawImage(i,0,0,240,sw);x.restore();i.close()})}addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')d(m.s,m.p,m.n,m.j)});<\/script></body></html>`);
+  p.document.close();
+  popups.push(p);
+}
+
+const topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');
+const topCtx=topCanvas.getContext('2d'),bottomCtx=bottomCanvas.getContext('2d');
+let packets=0,last=performance.now();
+function drawStrip(screen,part,parts,jpg){
+  createImageBitmap(new Blob([jpg],{type:'image/jpeg'})).then(img=>{
+    const ctx=screen===0?topCtx:bottomCtx,canvas=screen===0?topCanvas:bottomCanvas,stripW=canvas.width/parts,x=part*stripW;
+    ctx.save();ctx.translate(x+stripW,0);ctx.rotate(Math.PI/2);ctx.drawImage(img,0,0,240,stripW);ctx.restore();img.close();
+  }).catch(()=>{});
+  for(let i=popups.length-1;i>=0;i--){if(popups[i].closed){popups.splice(i,1);continue}try{popups[i].postMessage({k:'s',s:screen,p:part,n:parts,j:jpg},'*')}catch(e){}}
+  packets++;const now=performance.now();if(now-last>1000){document.getElementById('status').textContent=`Live • ${packets} strips/s`;packets=0;last=now}
+}
+
+async function start(){
+  try{
+    const res=await fetch('/stream',{cache:'no-store'});if(!res.ok||!res.body)throw new Error('stream');
+    document.getElementById('status').textContent='Live';
+    const r=res.body.getReader();let buf=new Uint8Array(0);
+    for(;;){
+      const {value,done}=await r.read();if(done)throw new Error('closed');
+      const n=new Uint8Array(buf.length+value.length);n.set(buf);n.set(value,buf.length);buf=n;
+      for(;;){
+        if(buf.length<12)break;
+        if(buf[0]!==0x33||buf[1]!==0x44||buf[2]!==0x53||buf[3]!==0x4c){buf=buf.slice(1);continue}
+        const screen=buf[4],part=buf[5],parts=buf[6],len=((buf[8]<<24)>>>0)|(buf[9]<<16)|(buf[10]<<8)|buf[11];
+        if(buf.length<12+len)break;
+        const jpg=buf.slice(12,12+len);buf=buf.slice(12+len);drawStrip(screen,part,parts,jpg);
+      }
+    }
+  }catch(e){document.getElementById('status').textContent='Disconnected — retrying…';setTimeout(start,1200)}
+}
+start();
 </script>
 </body>
 </html>
