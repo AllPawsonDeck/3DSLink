@@ -2,6 +2,10 @@
 from pathlib import Path
 import json
 import re
+import wave
+import struct
+import math
+import random
 
 ROOT = Path("upstream")
 
@@ -16,8 +20,6 @@ def patch_module():
     main_path = ROOT / "soos" / "main.cpp"
     text = main_path.read_text(encoding="utf-8")
 
-    # Embed the browser UI directly in the background module so the user only
-    # has to open http://<3ds-ip>:8080/ in a normal browser.
     html = Path("web/index.html").read_text(encoding="utf-8")
     header = (
         "#pragma once\n"
@@ -104,15 +106,12 @@ static void sendStreamHeaders(int fd)
 
     new_wri = r'''    int wribuf(int flags = 0)
     {
-        // Browser mode uses a tiny framing format instead of the original
-        // Chokistream protocol. Each packet is:
-        // 3DSL | screen | part | parts | reserved | JPEG length (BE) | JPEG
         if(gBrowserStream && getPakType() == 0x01)
         {
             u32 payload = getPakSize();
             u8 screen = (getPakSubtype() & 0x10) ? 1 : 0;
             u8 part = getPakSubtypeB() & 0x07;
-            u8 parts = (getPakSubtypeB() & 0x08) ? 8 : 1;
+            u8 parts = (getPakSubtypeB() & 0x08) ? 4 : 1;
             u8 h[12] = {
                 '3','D','S','L', screen, part, parts, 0,
                 (u8)(payload >> 24), (u8)(payload >> 16),
@@ -144,14 +143,12 @@ static void sendStreamHeaders(int fd)
 
     text = replace_once(text, "const int port = 6464;", "const int port = 8080;", "HTTP port")
 
-    # The upstream defaults are written before memset() and therefore get
-    # erased. Browser mode needs deterministic settings with no PC handshake.
     text = replace_once(
         text,
         "    memset(cfgblk, 0, sizeof(cfgblk));",
         "    memset(cfgblk, 0, sizeof(cfgblk));\n"
         "    cfgblk[0] = 1;  // stream immediately; no Chokistream handshake\n"
-        "    cfgblk[1] = 58; // JPEG quality: favor motion on Old 3DS\n"
+        "    cfgblk[1] = 42; // lighter JPEGs for Old 3DS motion\n"
         "    cfgblk[3] = 3;  // both screens\n"
         "    cfgblk[4] = 0;  // JPEG\n",
         "browser defaults",
@@ -178,7 +175,7 @@ static void sendStreamHeaders(int fd)
                         sendStreamHeaders(cli);
                         gBrowserStream = true;
                         cfgblk[0] = 1;
-                        cfgblk[1] = 58;
+                        cfgblk[1] = 42;
                         cfgblk[3] = 3;
                         cfgblk[4] = 0;
                     }
@@ -201,6 +198,17 @@ static void sendStreamHeaders(int fd)
     end_new = '''    gBrowserStream = false;\n    threadrunning = 0;\n}\n\n\nstatic FILE* f = nullptr;'''
     text = replace_once(text, end_old, end_new, "clear browser stream flag")
 
+    # Old 3DS tuning: four larger chunks instead of eight tiny ones. This cuts
+    # per-strip overhead and makes a complete screen arrive much sooner.
+    text = text.replace("limit[0] = 8;", "limit[0] = 4;")
+    text = text.replace("limit[1] = 8;", "limit[1] = 4;")
+    text = text.replace("stride[0] = 50;", "stride[0] = 100;")
+    text = text.replace("stride[1] = 40;", "stride[1] = 80;")
+    text = text.replace("screenbuf_siz = 50 * 240 * 3;", "screenbuf_siz = 100 * 240 * 3;")
+    text = text.replace("bufsoc_siz = 0xC000;", "bufsoc_siz = 0x10000;")
+    text = text.replace("netfunc_thread_priority = 0x14;", "netfunc_thread_priority = 0x20;")
+    text = text.replace("svcSleepThread(5e6);", "svcSleepThread(2e6);")
+
     main_path.write_text(text, encoding="utf-8")
 
     makefile = ROOT / "Makefile"
@@ -213,6 +221,44 @@ static void sendStreamHeaders(int fd)
     m = re.sub(r"^APP_UNIQUE_ID\s*:=.*$", "APP_UNIQUE_ID   :=  0xCF109", m, count=1, flags=re.M)
     m = m.replace("-DARM11 -D_3DS", "-D__3DS__")
     makefile.write_text(m, encoding="utf-8")
+
+
+def make_soft_banner_sound(path: Path):
+    # A single soft swoosh with a warm tail, followed by silence. The HOME Menu
+    # loops banner audio, so the long quiet tail prevents the old BIBIBIBI effect.
+    rate = 22050
+    duration = 2.9
+    rng = random.Random(0x3D5)
+    lp = 0.0
+    phase = 0.0
+    frames = []
+    for i in range(int(rate * duration)):
+        t = i / rate
+        sample = 0.0
+        if t < 0.72:
+            white = rng.uniform(-1.0, 1.0)
+            lp = lp * 0.92 + white * 0.08
+            env = math.sin(math.pi * min(1.0, t / 0.72)) ** 2
+            sample += lp * env * 0.30
+            freq = 180.0 + 260.0 * (t / 0.72)
+            phase += 2.0 * math.pi * freq / rate
+            sample += math.sin(phase) * env * 0.11
+        if 0.32 <= t < 1.05:
+            x = t - 0.32
+            env = math.exp(-4.2 * x) * min(1.0, x / 0.025)
+            sample += env * (
+                0.15 * math.sin(2*math.pi*392.0*x) +
+                0.10 * math.sin(2*math.pi*523.25*x) +
+                0.07 * math.sin(2*math.pi*659.25*x)
+            )
+        sample = max(-1.0, min(1.0, sample))
+        frames.append(struct.pack('<h', int(sample * 32767)))
+
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b''.join(frames))
 
 
 def patch_loader():
@@ -274,11 +320,13 @@ def patch_loader():
     m = re.sub(r"^APP_AUTHOR\s*:=.*$", "APP_AUTHOR      :=  AllPawsonDeck", m, count=1, flags=re.M)
     m = re.sub(r"^APP_PRODUCT_CODE\s*:=.*$", "APP_PRODUCT_CODE:=  CTR-N-3DSL", m, count=1, flags=re.M)
     m = re.sub(r"^APP_UNIQUE_ID\s*:=.*$", "APP_UNIQUE_ID   :=  0xCFAAF", m, count=1, flags=re.M)
-    m = m.replace("CXXFLAGS\t:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11", "CXXFLAGS\t:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11")
 
-    # Keep the user's PNG icon, but omit the old Chiruno/ChLoad extended banner.
-    m = m.replace("$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/banner.bin $(TOPDIR)/$(BUILD)/image.bin", "$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/image.bin")
-    m = m.replace(" -banner $(TOPDIR)/$(BUILD)/banner.bin", "")
+    # Use our own longer non-beepy banner sound; the workflow's legacy
+    # banner.wav is intentionally ignored.
+    make_soft_banner_sound(ROOT / "HzLoad" / "assets" / "3dslink.wav")
+    m = m.replace("$(TOPDIR)/assets/banner.wav", "$(TOPDIR)/assets/3dslink.wav")
+    m = m.replace("-a $(TOPDIR)/assets/banner.wav", "-a $(TOPDIR)/assets/3dslink.wav")
+
     makefile.write_text(m, encoding="utf-8")
 
 
