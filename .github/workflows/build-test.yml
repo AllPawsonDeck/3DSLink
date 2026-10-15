@@ -66,10 +66,8 @@ jobs:
           s = s.replace('svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr])', 'svcStartInterProcessDma(&dmahand,0xFFFF8001,(u32)screenbuf,srcprochand,(u32)srcaddr,siz,(const DmaConfig*)dma_config[scr])')
           p.write_text(s)
           PY
-          # ChirunoMod's old gx.c manually reaches into libctru GSP internals
-          # that are no longer public. The module itself uses gspInit/gspExit
-          # directly, so this obsolete shim is not needed by 3DSLink.
           rm -f upstream/soos/service/gx.c
+          sed -i 's#^LIBDIRS.*#LIBDIRS := $(CTRULIB) $(DEVKITPRO)/portlibs/armv6k $(DEVKITPRO)/portlibs/3ds#' upstream/Makefile
 
       - name: Install makerom and bannertool
         run: |
