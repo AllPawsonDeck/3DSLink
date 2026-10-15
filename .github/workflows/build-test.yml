@@ -114,6 +114,11 @@ jobs:
           s = p.read_text()
           s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n// 3DSLink does not use the console notification LED as a status display.\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
           s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
+          # Old 3DS: yield more aggressively to the system/audio services.
+          s = s.replace('netfunc_thread_priority = 0x14;', 'netfunc_thread_priority = 0x20;')
+          s = s.replace('svcSleepThread(5e6);', 'svcSleepThread(8e6);')
+          # Slightly lighter JPEGs reduce CPU and Wi-Fi pressure without making the stream unreadable.
+          s = s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 48;')
           p.write_text(s)
 
           p = Path('upstream/Makefile')
@@ -167,7 +172,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha-3
+          name: 3DSLink-alpha-4
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
@@ -178,11 +183,11 @@ jobs:
       - name: Publish alpha release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v0.1.0-alpha.3
+          TAG: v0.1.0-alpha.4
         run: |
-          NOTES='Third hardware-test alpha. The streaming background module is now compiled with the exact legacy generation ChirunoMod requires: devkitARM r46 and libctru 1.2.1. Alpha 2 was compiled with current libctru and the uploaded Luma crash dump confirmed the 3DSLink background process was data-aborting before port 8080 could stay alive. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. No audio streaming yet.'
+          NOTES='Fourth hardware-test alpha. Fixes Old 3DS browser orientation/strip ordering and reduces audio crackle by lowering the streaming thread priority, adding a little more Old-3DS frame pacing, and reducing JPEG quality from 58 to 48. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
-            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 3' --prerelease --notes "$NOTES"
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 4' --prerelease --notes "$NOTES"
           fi
