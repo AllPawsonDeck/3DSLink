@@ -26,6 +26,8 @@ No Java receiver, no Linux desktop app, and no special viewer software on the Ch
 
 Very early development. Do not install test CIAs unless a release explicitly says they are ready for hardware testing.
 
+Build automation is being wired up now.
+
 ## Credits / license
 
 3DSLink is being built using ideas and, where incorporated, GPLv3 code from ChirunoMod, itself based on HzMod. Any derivative ChirunoMod/HzMod code in this repository remains GPLv3.
