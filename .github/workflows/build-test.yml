@@ -1,9 +1,16 @@
-name: Build 3DSLink test
+name: Build and Release 3DSLink
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 3dslink-build
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -17,42 +24,70 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             git curl wget unzip ca-certificates build-essential \
-            autoconf automake libtool pkg-config
+            autoconf automake libtool pkg-config python3 gh
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
-      - name: Build legacy 3DS portlibs we need
+      - name: Build 3DS turbojpeg portlib
         run: |
           export DEVKITPRO=/opt/devkitpro
           export DEVKITARM=/opt/devkitpro/devkitARM
           git clone --depth 1 https://github.com/LoveMHz/3DS-Portlibs.git /tmp/3ds-portlibs
           cd /tmp/3ds-portlibs
-          # The old portlib recipe injects -Drandom()=rand(), but modern newlib
-          # already declares random(void), so that compatibility macro now breaks
-          # the headers. Remove only that obsolete flag.
           sed -i 's/CFLAGS+="\\"-Drandom()=rand()\\"" //g' Makefile
           make libjpeg-turbo
           make install
           test -f /opt/devkitpro/portlibs/armv6k/include/turbojpeg.h
 
-      - name: Clone ChirunoMod
+      - name: Clone ChirunoMod base
         run: git clone --depth 1 --branch nightly-v4 https://github.com/ChainSwordCS/ChirunoMod.git upstream
 
-      - name: Install makerom
+      - name: Apply 3DSLink browser-stream patches
+        run: |
+          python3 scripts/prepare_upstream.py
+          base64 -d assets/icon.b64 > upstream/HzLoad/assets/logo.png
+
+      - name: Install makerom and bannertool
         run: |
           curl -sSL -o /tmp/makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
           unzip -o /tmp/makerom.zip -d /usr/local/bin
           chmod +x /usr/local/bin/makerom
+          curl -sSL -o /tmp/bannertool.zip https://github.com/Epicpkmn11/bannertool/releases/download/v1.2.2/bannertool.zip
+          unzip -oj /tmp/bannertool.zip 'linux-x86_64/bannertool' -d /usr/local/bin
+          chmod +x /usr/local/bin/bannertool
 
-      - name: Try build upstream
+      - name: Build 3DSLink module
         run: |
           export DEVKITPRO=/opt/devkitpro
           export DEVKITARM=/opt/devkitpro/devkitARM
           cd upstream
           make -j2
+          test -f 3DSLinkModule.cia
 
-      - name: Upload CIA
+      - name: Build 3DSLink launcher
+        run: |
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=/opt/devkitpro/devkitARM
+          cd upstream/HzLoad
+          make -j2
+          test -f 3DSLink.cia
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chirunomod-test
-          path: upstream/ChirunoMod.cia
+          name: 3DSLink-alpha
+          path: |
+            upstream/HzLoad/3DSLink.cia
+            upstream/3DSLinkModule.cia
           if-no-files-found: error
+
+      - name: Publish alpha release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v0.1.0-alpha.1
+        run: |
+          NOTES='First hardware-test alpha. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. Launch 3DSLink, then open the local URL shown on the bottom screen in a browser. Old 3DS/3DS XL is the primary target. This build is experimental and has no audio.'
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
+          else
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 1' --prerelease --notes "$NOTES"
+          fi
