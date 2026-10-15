@@ -24,7 +24,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             git curl wget unzip ca-certificates build-essential \
-            autoconf automake libtool pkg-config python3 gh
+            autoconf automake libtool pkg-config python3 python3-pil gh
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
       - name: Install 3DS zlib
@@ -52,7 +52,12 @@ jobs:
       - name: Apply 3DSLink browser-stream patches
         run: |
           python3 scripts/prepare_upstream.py
-          base64 -d assets/icon.b64 > upstream/HzLoad/assets/logo.png
+          base64 -d assets/icon.b64 > /tmp/3dslink-icon.png
+          python3 - <<'PY'
+          from PIL import Image
+          src = Image.open('/tmp/3dslink-icon.png').convert('RGBA')
+          src.resize((48, 48), Image.Resampling.LANCZOS).save('upstream/HzLoad/assets/logo.png')
+          PY
 
       - name: Patch current libctru compatibility
         run: |
