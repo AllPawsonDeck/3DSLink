@@ -126,10 +126,14 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha-2
+          name: 3DSLink-alpha-2-debug
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
+            upstream/3DSLinkModule.elf
+            upstream/3DSLinkModule.map
+            upstream/HzLoad/3DSLink.elf
+            upstream/HzLoad/3DSLink.map
           if-no-files-found: error
 
       - name: Publish alpha release
