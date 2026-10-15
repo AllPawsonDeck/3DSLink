@@ -27,12 +27,12 @@ jobs:
             autoconf automake libtool pkg-config python3 python3-pil gh
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
-      - name: Install 3DS zlib
+      - name: Install 3DS libraries
         run: |
           if command -v dkp-pacman >/dev/null 2>&1; then
-            dkp-pacman -S --noconfirm --needed 3ds-zlib
+            dkp-pacman -S --noconfirm --needed 3ds-zlib 3ds-citro2d 3ds-citro3d
           else
-            pacman -S --noconfirm --needed 3ds-zlib
+            pacman -S --noconfirm --needed 3ds-zlib 3ds-citro2d 3ds-citro3d
           fi
 
       - name: Build 3DS turbojpeg portlib
@@ -49,17 +49,31 @@ jobs:
       - name: Clone ChirunoMod base
         run: git clone --depth 1 --branch nightly-v4 https://github.com/ChainSwordCS/ChirunoMod.git upstream
 
-      - name: Apply 3DSLink browser-stream patches
+      - name: Apply 3DSLink patches and artwork
         run: |
           python3 scripts/prepare_upstream.py
+          cp src/launcher.c upstream/HzLoad/soos/main.c
           base64 -d assets/icon.b64 > /tmp/3dslink-icon.png
           python3 - <<'PY'
           from PIL import Image
+          import wave, struct
+
           src = Image.open('/tmp/3dslink-icon.png').convert('RGBA')
           src.resize((48, 48), Image.Resampling.LANCZOS).save('upstream/HzLoad/assets/logo.png')
+
+          banner = Image.new('RGBA', (256, 128), (255, 154, 20, 255))
+          art = src.resize((112, 112), Image.Resampling.LANCZOS)
+          banner.alpha_composite(art, ((256 - 112)//2, 8))
+          banner.convert('RGB').save('upstream/HzLoad/assets/banner.png')
+
+          with wave.open('upstream/HzLoad/assets/banner.wav', 'wb') as w:
+              w.setnchannels(1)
+              w.setsampwidth(2)
+              w.setframerate(22050)
+              w.writeframes(struct.pack('<h', 0) * 2205)
           PY
 
-      - name: Patch current libctru compatibility
+      - name: Patch current libctru compatibility and alpha stability
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -70,12 +84,16 @@ jobs:
           s = s.replace('int dmaState = 0;', 'DmaState dmaState = DMASTATE_STARTING;')
           s = s.replace('svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf,', 'svcFlushProcessDataCache(0xFFFF8001, (u32)screenbuf,')
           s = s.replace('svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr])', 'svcStartInterProcessDma(&dmahand,0xFFFF8001,(u32)screenbuf,srcprochand,(u32)srcaddr,siz,(const DmaConfig*)dma_config[scr])')
+          s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n// 3DSLink does not use the console notification LED as a status display.\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
+          s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
           p.write_text(s)
 
-          p = Path('upstream/HzLoad/soos/main.c')
-          s = p.read_text()
-          s = s.replace('NS_TerminateProcessTID(0x000401300CF10902ULL);', 'NS_TerminateProcessTID(0x000401300CF10902ULL, 0);')
-          p.write_text(s)
+          p = Path('upstream/HzLoad/Makefile')
+          m = p.read_text()
+          m = m.replace('LIBS\t:= -lctru -lm', 'LIBS\t:= -lcitro2d -lcitro3d -lctru -lm')
+          m = m.replace('$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/image.bin', '$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/banner.bin $(TOPDIR)/$(BUILD)/image.bin')
+          m = m.replace(' -icon $(TOPDIR)/$(BUILD)/image.bin -DAPP_TITLE=', ' -icon $(TOPDIR)/$(BUILD)/image.bin -banner $(TOPDIR)/$(BUILD)/banner.bin -DAPP_TITLE=')
+          p.write_text(m)
           PY
           rm -f upstream/soos/service/gx.c
           sed -i 's#^LIBDIRS.*#LIBDIRS := $(CTRULIB) $(DEVKITPRO)/portlibs/armv6k $(DEVKITPRO)/portlibs/3ds#' upstream/Makefile
@@ -108,7 +126,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha
+          name: 3DSLink-alpha-2
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
@@ -117,11 +135,11 @@ jobs:
       - name: Publish alpha release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v0.1.0-alpha.1
+          TAG: v0.1.0-alpha.2
         run: |
-          NOTES='First hardware-test alpha. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. Launch 3DSLink, then open the local URL shown on the bottom screen in a browser. Old 3DS/3DS XL is the primary target. This build is experimental and has no audio.'
+          NOTES='Second hardware-test alpha. Changes: proper HOME Menu top-screen banner, app-style launcher UI, HOME button disabled inside the launcher to avoid the alpha-1 HOME crash path, notification-LED status colors removed, server binds to all Wi-Fi interfaces, and the launcher checks whether port 8080 is actually answering. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. No audio streaming yet.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
-            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 1' --prerelease --notes "$NOTES"
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 2' --prerelease --notes "$NOTES"
           fi
