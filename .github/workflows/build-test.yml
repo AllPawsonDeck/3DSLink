@@ -27,6 +27,14 @@ jobs:
             autoconf automake libtool pkg-config python3 gh
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
+      - name: Install 3DS zlib
+        run: |
+          if command -v dkp-pacman >/dev/null 2>&1; then
+            dkp-pacman -S --noconfirm --needed 3ds-zlib
+          else
+            pacman -S --noconfirm --needed 3ds-zlib
+          fi
+
       - name: Build 3DS turbojpeg portlib
         run: |
           export DEVKITPRO=/opt/devkitpro
