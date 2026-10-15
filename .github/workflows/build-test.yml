@@ -58,12 +58,18 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           p = Path('upstream/soos/main.cpp')
           s = p.read_text()
           s = s.replace('GSPGPU_FramebufferFormats', 'GSPGPU_FramebufferFormat')
           s = s.replace('int dmaState = 0;', 'DmaState dmaState = DMASTATE_STARTING;')
           s = s.replace('svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf,', 'svcFlushProcessDataCache(0xFFFF8001, (u32)screenbuf,')
           s = s.replace('svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr])', 'svcStartInterProcessDma(&dmahand,0xFFFF8001,(u32)screenbuf,srcprochand,(u32)srcaddr,siz,(const DmaConfig*)dma_config[scr])')
+          p.write_text(s)
+
+          p = Path('upstream/HzLoad/soos/main.c')
+          s = p.read_text()
+          s = s.replace('NS_TerminateProcessTID(0x000401300CF10902ULL);', 'NS_TerminateProcessTID(0x000401300CF10902ULL, 0);')
           p.write_text(s)
           PY
           rm -f upstream/soos/service/gx.c
