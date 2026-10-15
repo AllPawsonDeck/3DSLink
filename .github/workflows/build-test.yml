@@ -46,6 +46,22 @@ jobs:
             'https://wii.leseratte10.de/devkitPro/libctru/2017/libctru-1.2.1.tar.bz2'
           tar -xjf /tmp/libctru-1.2.1.tar.bz2 -C /opt/devkitpro-legacy
 
+          armgcc="$(find /opt/devkitpro-legacy -type f -name arm-none-eabi-gcc | head -n 1)"
+          test -n "$armgcc"
+          armroot="$(dirname "$(dirname "$armgcc")")"
+          if [ "$armroot" != "/opt/devkitpro-legacy/devkitARM" ]; then
+            rm -rf /opt/devkitpro-legacy/devkitARM
+            ln -s "$armroot" /opt/devkitpro-legacy/devkitARM
+          fi
+
+          ctru_header="$(find /opt/devkitpro-legacy -type f -path '*/include/3ds.h' | grep -v '/devkitARM/' | head -n 1)"
+          test -n "$ctru_header"
+          ctruroot="$(dirname "$(dirname "$ctru_header")")"
+          if [ "$ctruroot" != "/opt/devkitpro-legacy/libctru" ]; then
+            rm -rf /opt/devkitpro-legacy/libctru
+            ln -s "$ctruroot" /opt/devkitpro-legacy/libctru
+          fi
+
           test -x /opt/devkitpro-legacy/devkitARM/bin/arm-none-eabi-gcc
           test -f /opt/devkitpro-legacy/libctru/include/3ds.h
 
@@ -100,8 +116,6 @@ jobs:
           s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
           p.write_text(s)
 
-          # prepare_upstream.py also makes a compatibility change intended for
-          # current libctru. ChirunoMod itself requires the original legacy defines.
           p = Path('upstream/Makefile')
           m = p.read_text().replace('-D__3DS__', '-DARM11 -D_3DS')
           p.write_text(m)
