@@ -26,6 +26,10 @@ jobs:
           export DEVKITARM=/opt/devkitpro/devkitARM
           git clone --depth 1 https://github.com/LoveMHz/3DS-Portlibs.git /tmp/3ds-portlibs
           cd /tmp/3ds-portlibs
+          # The old portlib recipe injects -Drandom()=rand(), but modern newlib
+          # already declares random(void), so that compatibility macro now breaks
+          # the headers. Remove only that obsolete flag.
+          sed -i 's/CFLAGS+="\\"-Drandom()=rand()\\"" //g' Makefile
           make libjpeg-turbo
           make install
           test -f /opt/devkitpro/portlibs/armv6k/include/turbojpeg.h
