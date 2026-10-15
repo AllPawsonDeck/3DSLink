@@ -11,25 +11,41 @@ jobs:
     container: devkitpro/devkitarm:latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install deps
+
+      - name: Install host build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git curl unzip ca-certificates
-          dkp-pacman -Sy --noconfirm --needed 3ds-dev 3ds-libjpeg-turbo 3ds-zlib || true
+          apt-get install -y --no-install-recommends \
+            git curl wget unzip ca-certificates build-essential \
+            autoconf automake libtool pkg-config
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
+
+      - name: Build legacy 3DS portlibs we need
+        run: |
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=/opt/devkitpro/devkitARM
+          git clone --depth 1 https://github.com/LoveMHz/3DS-Portlibs.git /tmp/3ds-portlibs
+          cd /tmp/3ds-portlibs
+          make libjpeg-turbo
+          make install
+          test -f /opt/devkitpro/portlibs/armv6k/include/turbojpeg.h
+
       - name: Clone ChirunoMod
         run: git clone --depth 1 --branch nightly-v4 https://github.com/ChainSwordCS/ChirunoMod.git upstream
+
       - name: Install makerom
         run: |
           curl -sSL -o /tmp/makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
           unzip -o /tmp/makerom.zip -d /usr/local/bin
           chmod +x /usr/local/bin/makerom
+
       - name: Try build upstream
         run: |
           export DEVKITPRO=/opt/devkitpro
           export DEVKITARM=/opt/devkitpro/devkitARM
           cd upstream
           make -j2
+
       - name: Upload CIA
         uses: actions/upload-artifact@v4
         with:
