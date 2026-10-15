@@ -46,6 +46,19 @@ jobs:
           python3 scripts/prepare_upstream.py
           base64 -d assets/icon.b64 > upstream/HzLoad/assets/logo.png
 
+      - name: Patch current libctru compatibility
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('upstream/soos/main.cpp')
+          s = p.read_text()
+          s = s.replace('GSPGPU_FramebufferFormats', 'GSPGPU_FramebufferFormat')
+          s = s.replace('int dmaState = 0;', 'DmaState dmaState = DMASTATE_STARTING;')
+          s = s.replace('svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf,', 'svcFlushProcessDataCache(0xFFFF8001, (u32)screenbuf,')
+          s = s.replace('svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr])', 'svcStartInterProcessDma(&dmahand,0xFFFF8001,(u32)screenbuf,srcprochand,(u32)srcaddr,siz,(const DmaConfig*)dma_config[scr])')
+          p.write_text(s)
+          PY
+
       - name: Install makerom and bannertool
         run: |
           curl -sSL -o /tmp/makerom.zip https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.3/makerom-v0.18.3-ubuntu_x86_64.zip
