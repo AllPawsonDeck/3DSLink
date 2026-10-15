@@ -30,9 +30,9 @@ jobs:
       - name: Install 3DS libraries
         run: |
           if command -v dkp-pacman >/dev/null 2>&1; then
-            dkp-pacman -S --noconfirm --needed 3ds-zlib 3ds-citro2d 3ds-citro3d
+            dkp-pacman -S --noconfirm --needed 3ds-zlib citro2d citro3d
           else
-            pacman -S --noconfirm --needed 3ds-zlib 3ds-citro2d 3ds-citro3d
+            pacman -S --noconfirm --needed 3ds-zlib citro2d citro3d
           fi
 
       - name: Build 3DS turbojpeg portlib
