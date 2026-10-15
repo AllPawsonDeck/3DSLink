@@ -23,28 +23,45 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git curl wget unzip ca-certificates build-essential \
+            git curl wget unzip bzip2 ca-certificates build-essential \
             autoconf automake libtool pkg-config python3 python3-pil gh
           git config --global --add safe.directory "$GITHUB_WORKSPACE" || true
 
-      - name: Install 3DS libraries
+      - name: Install modern 3DS libraries for launcher
         run: |
           if command -v dkp-pacman >/dev/null 2>&1; then
-            dkp-pacman -S --noconfirm --needed 3ds-zlib citro2d citro3d
+            dkp-pacman -S --noconfirm --needed citro2d citro3d
           else
-            pacman -S --noconfirm --needed 3ds-zlib citro2d citro3d
+            pacman -S --noconfirm --needed citro2d citro3d
           fi
 
-      - name: Build 3DS turbojpeg portlib
+      - name: Install ChirunoMod legacy toolchain
         run: |
-          export DEVKITPRO=/opt/devkitpro
-          export DEVKITARM=/opt/devkitpro/devkitARM
-          git clone --depth 1 https://github.com/LoveMHz/3DS-Portlibs.git /tmp/3ds-portlibs
-          cd /tmp/3ds-portlibs
+          mkdir -p /opt/devkitpro-legacy
+          curl -fL --retry 3 -o /tmp/devkitarm-r46.tar.bz2 \
+            'https://wii.leseratte10.de/devkitPro/devkitARM/r46%20%282017%29/devkitARM_r46-x86_64-linux.tar.bz2'
+          tar -xjf /tmp/devkitarm-r46.tar.bz2 -C /opt/devkitpro-legacy
+
+          curl -fL --retry 3 -o /tmp/libctru-1.2.1.tar.bz2 \
+            'https://wii.leseratte10.de/devkitPro/libctru/2017/libctru-1.2.1.tar.bz2'
+          tar -xjf /tmp/libctru-1.2.1.tar.bz2 -C /opt/devkitpro-legacy
+
+          test -x /opt/devkitpro-legacy/devkitARM/bin/arm-none-eabi-gcc
+          test -f /opt/devkitpro-legacy/libctru/include/3ds.h
+
+      - name: Build legacy 3DS zlib and turbojpeg
+        run: |
+          export DEVKITPRO=/opt/devkitpro-legacy
+          export DEVKITARM=/opt/devkitpro-legacy/devkitARM
+          export CTRULIB=/opt/devkitpro-legacy/libctru
+          export PATH="$DEVKITARM/bin:$PATH"
+          git clone --depth 1 https://github.com/LoveMHz/3DS-Portlibs.git /tmp/3ds-portlibs-legacy
+          cd /tmp/3ds-portlibs-legacy
           sed -i 's/CFLAGS+="\\"-Drandom()=rand()\\"" //g' Makefile
-          make libjpeg-turbo
-          make install
-          test -f /opt/devkitpro/portlibs/armv6k/include/turbojpeg.h
+          make zlib install-zlib
+          make libjpeg-turbo install
+          test -f /opt/devkitpro-legacy/portlibs/armv6k/include/turbojpeg.h
+          test -f /opt/devkitpro-legacy/portlibs/armv6k/lib/libz.a
 
       - name: Clone ChirunoMod base
         run: git clone --depth 1 --branch nightly-v4 https://github.com/ChainSwordCS/ChirunoMod.git upstream
@@ -73,21 +90,27 @@ jobs:
               w.writeframes(struct.pack('<h', 0) * 2205)
           PY
 
-      - name: Patch current libctru compatibility and alpha stability
+      - name: Patch module runtime behavior
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           p = Path('upstream/soos/main.cpp')
           s = p.read_text()
-          s = s.replace('GSPGPU_FramebufferFormats', 'GSPGPU_FramebufferFormat')
-          s = s.replace('int dmaState = 0;', 'DmaState dmaState = DMASTATE_STARTING;')
-          s = s.replace('svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf,', 'svcFlushProcessDataCache(0xFFFF8001, (u32)screenbuf,')
-          s = s.replace('svcStartInterProcessDma(&dmahand,0xFFFF8001,screenbuf,srcprochand,srcaddr,siz,dma_config[scr])', 'svcStartInterProcessDma(&dmahand,0xFFFF8001,(u32)screenbuf,srcprochand,(u32)srcaddr,siz,(const DmaConfig*)dma_config[scr])')
           s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n// 3DSLink does not use the console notification LED as a status display.\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
           s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
           p.write_text(s)
 
+          # prepare_upstream.py also makes a compatibility change intended for
+          # current libctru. ChirunoMod itself requires the original legacy defines.
+          p = Path('upstream/Makefile')
+          m = p.read_text().replace('-D__3DS__', '-DARM11 -D_3DS')
+          p.write_text(m)
+          PY
+
+      - name: Patch launcher for current libctru
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
           p = Path('upstream/HzLoad/Makefile')
           m = p.read_text()
           m = m.replace('LIBS\t:= -lctru -lm', 'LIBS\t:= -lcitro2d -lcitro3d -lctru -lm')
@@ -95,8 +118,6 @@ jobs:
           m = m.replace(' -icon $(TOPDIR)/$(BUILD)/image.bin -DAPP_TITLE=', ' -icon $(TOPDIR)/$(BUILD)/image.bin -banner $(TOPDIR)/$(BUILD)/banner.bin -DAPP_TITLE=')
           p.write_text(m)
           PY
-          rm -f upstream/soos/service/gx.c
-          sed -i 's#^LIBDIRS.*#LIBDIRS := $(CTRULIB) $(DEVKITPRO)/portlibs/armv6k $(DEVKITPRO)/portlibs/3ds#' upstream/Makefile
 
       - name: Install makerom and bannertool
         run: |
@@ -107,43 +128,47 @@ jobs:
           unzip -oj /tmp/bannertool.zip 'linux-x86_64/bannertool' -d /usr/local/bin
           chmod +x /usr/local/bin/bannertool
 
-      - name: Build 3DSLink module
+      - name: Build 3DSLink module with legacy toolchain
         run: |
-          export DEVKITPRO=/opt/devkitpro
-          export DEVKITARM=/opt/devkitpro/devkitARM
+          export DEVKITPRO=/opt/devkitpro-legacy
+          export DEVKITARM=/opt/devkitpro-legacy/devkitARM
+          export CTRULIB=/opt/devkitpro-legacy/libctru
+          export PATH="$DEVKITARM/bin:/usr/local/bin:$PATH"
           cd upstream
+          make clean || true
           make -j2
           test -f 3DSLinkModule.cia
 
-      - name: Build 3DSLink launcher
+      - name: Build 3DSLink launcher with current toolchain
         run: |
           export DEVKITPRO=/opt/devkitpro
           export DEVKITARM=/opt/devkitpro/devkitARM
+          export CTRULIB=/opt/devkitpro/libctru
+          export PATH="$DEVKITARM/bin:/usr/local/bin:$PATH"
           cd upstream/HzLoad
+          make clean || true
           make -j2
           test -f 3DSLink.cia
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha-2-debug
+          name: 3DSLink-alpha-3
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
             upstream/3DSLinkModule.elf
-            upstream/3DSLinkModule.map
-            upstream/HzLoad/3DSLink.elf
-            upstream/HzLoad/3DSLink.map
+            upstream/chirunomod-build/3DSLinkModule.map
           if-no-files-found: error
 
       - name: Publish alpha release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v0.1.0-alpha.2
+          TAG: v0.1.0-alpha.3
         run: |
-          NOTES='Second hardware-test alpha. Changes: proper HOME Menu top-screen banner, app-style launcher UI, HOME button disabled inside the launcher to avoid the alpha-1 HOME crash path, notification-LED status colors removed, server binds to all Wi-Fi interfaces, and the launcher checks whether port 8080 is actually answering. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. No audio streaming yet.'
+          NOTES='Third hardware-test alpha. The streaming background module is now compiled with the exact legacy generation ChirunoMod requires: devkitARM r46 and libctru 1.2.1. Alpha 2 was compiled with current libctru and the uploaded Luma crash dump confirmed the 3DSLink background process was data-aborting before port 8080 could stay alive. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI. No audio streaming yet.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
-            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 2' --prerelease --notes "$NOTES"
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 3' --prerelease --notes "$NOTES"
           fi
