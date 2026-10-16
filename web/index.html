@@ -14,15 +14,17 @@
 <script>
 const statusEl=document.getElementById('status'),topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');
 const topCtx=topCanvas.getContext('2d'),bottomCtx=bottomCanvas.getContext('2d');
+const topBack=document.createElement('canvas'),bottomBack=document.createElement('canvas');topBack.width=400;topBack.height=240;bottomBack.width=320;bottomBack.height=240;
+const topBackCtx=topBack.getContext('2d'),bottomBackCtx=bottomBack.getContext('2d');
 let streamMode='both',controller=null,generation=0,topFrames=0,bottomFrames=0,lastStat=performance.now();
 const buffers=[{parts:0,strips:[],mask:0},{parts:0,strips:[],mask:0}],chains=[Promise.resolve(),Promise.resolve()],popups=[];
 
 function setMode(mode){const s=document.getElementById('shell');s.className='shell';if(mode!=='shell')s.classList.add(mode);const want=mode==='toponly'?'top':'both';if(want!==streamMode){streamMode=want;connect()}}
-function paint(ctx,canvas,part,parts,img){const w=canvas.width/parts,x=(parts-1-part)*w;ctx.save();ctx.translate(x,canvas.height);ctx.rotate(-Math.PI/2);ctx.drawImage(img,0,0,canvas.height,w);ctx.restore()}
+function paintStrip(ctx,canvas,part,parts,img){const w=canvas.width/parts,x=(parts-1-part)*w;ctx.save();ctx.translate(x,canvas.height);ctx.rotate(-Math.PI/2);ctx.drawImage(img,0,0,canvas.height,w);ctx.restore()}
 
 function pop(which){
  const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520,p=window.open('about:blank','3DSLink-'+which,`popup=yes,width=${w},height=${h}`);if(!p)return;
- const st=which!=='bottom',sb=which!=='top';p.document.open();p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center}canvas{display:block;background:#000;max-width:100%;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${st?'<canvas id="pt" width="400" height="240"></canvas>':''}${sb?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>const B=[{p:0,s:[],m:0},{p:0,s:[],m:0}],Q=[Promise.resolve(),Promise.resolve()];function pt(c,x,p,n,i){const w=c.width/n,dx=(n-1-p)*w;x.save();x.translate(dx,c.height);x.rotate(-Math.PI/2);x.drawImage(i,0,0,c.height,w);x.restore()}async function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;const i=await createImageBitmap(new Blob([j],{type:'image/jpeg'})),b=B[s];if(p===0||b.p!==n){b.p=n;b.s=new Array(n);b.m=0}b.s[p]=i;b.m|=1<<p;if(b.m===((1<<n)-1)){const x=c.getContext('2d');for(let k=0;k<n;k++){pt(c,x,k,n,b.s[k]);b.s[k].close()}b.m=0}}addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')Q[m.s]=Q[m.s].then(()=>d(m.s,m.p,m.n,m.j)).catch(()=>{})});<\/script></body></html>`);p.document.close();popups.push(p)
+ const st=which!=='bottom',sb=which!=='top';p.document.open();p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center}canvas{display:block;background:#000;max-width:100%;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${st?'<canvas id="pt" width="400" height="240"></canvas>':''}${sb?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>const B=[{p:0,s:[],m:0},{p:0,s:[],m:0}],Q=[Promise.resolve(),Promise.resolve()],H=[];function ps(x,c,p,n,i){const w=c.width/n,dx=(n-1-p)*w;x.save();x.translate(dx,c.height);x.rotate(-Math.PI/2);x.drawImage(i,0,0,c.height,w);x.restore()}function hidden(s,c){if(!H[s]){H[s]=document.createElement('canvas');H[s].width=c.width;H[s].height=c.height}return H[s]}async function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;const i=await createImageBitmap(new Blob([j],{type:'image/jpeg'})),b=B[s];if(p===0||b.p!==n){for(const q of b.s)if(q&&q.close)q.close();b.p=n;b.s=new Array(n);b.m=0}b.s[p]=i;b.m|=1<<p;if(b.m===((1<<n)-1)){const h=hidden(s,c),hx=h.getContext('2d'),x=c.getContext('2d');hx.clearRect(0,0,h.width,h.height);for(let k=0;k<n;k++){ps(hx,h,k,n,b.s[k]);b.s[k].close();b.s[k]=null}x.clearRect(0,0,c.width,c.height);x.drawImage(h,0,0);b.m=0}}addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')Q[m.s]=Q[m.s].then(()=>d(m.s,m.p,m.n,m.j)).catch(()=>{})});<\/script></body></html>`);p.document.close();popups.push(p)
 }
 
 async function decodeStrip(screen,part,parts,jpg){
@@ -31,8 +33,10 @@ async function decodeStrip(screen,part,parts,jpg){
  b.strips[part]=img;b.mask|=1<<part;
  for(let i=popups.length-1;i>=0;i--){if(popups[i].closed){popups.splice(i,1);continue}try{popups[i].postMessage({k:'s',s:screen,p:part,n:parts,j:jpg},'*')}catch(e){}}
  if(b.mask===((1<<parts)-1)){
-   const ctx=screen===0?topCtx:bottomCtx,canvas=screen===0?topCanvas:bottomCanvas;
-   for(let p=0;p<parts;p++){paint(ctx,canvas,p,parts,b.strips[p]);b.strips[p].close();b.strips[p]=null}b.mask=0;
+   const frontCtx=screen===0?topCtx:bottomCtx,front=screen===0?topCanvas:bottomCanvas,backCtx=screen===0?topBackCtx:bottomBackCtx,back=screen===0?topBack:bottomBack;
+   backCtx.clearRect(0,0,back.width,back.height);
+   for(let p=0;p<parts;p++){paintStrip(backCtx,back,p,parts,b.strips[p]);b.strips[p].close();b.strips[p]=null}
+   frontCtx.clearRect(0,0,front.width,front.height);frontCtx.drawImage(back,0,0);b.mask=0;
    if(screen===0)topFrames++;else bottomFrames++;
  }
  const now=performance.now();if(now-lastStat>1000){statusEl.textContent=`Live • top ${topFrames} fps${streamMode==='both'?` • bottom ${bottomFrames} fps`:''}`;topFrames=bottomFrames=0;lastStat=now}
