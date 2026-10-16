@@ -4,8 +4,6 @@ import json
 import re
 import wave
 import struct
-import math
-import random
 
 ROOT = Path("upstream")
 
@@ -111,7 +109,9 @@ static void sendStreamHeaders(int fd)
             u32 payload = getPakSize();
             u8 screen = (getPakSubtype() & 0x10) ? 1 : 0;
             u8 part = getPakSubtypeB() & 0x07;
-            u8 parts = (getPakSubtypeB() & 0x08) ? 4 : 1;
+            // The Old 3DS framebuffer capture path really is eight 50/40px
+            // columns. Making these columns wider corrupts the capture layout.
+            u8 parts = (getPakSubtypeB() & 0x08) ? (u8)8 : (u8)1;
             u8 h[12] = {
                 '3','D','S','L', screen, part, parts, 0,
                 (u8)(payload >> 24), (u8)(payload >> 16),
@@ -148,7 +148,7 @@ static void sendStreamHeaders(int fd)
         "    memset(cfgblk, 0, sizeof(cfgblk));",
         "    memset(cfgblk, 0, sizeof(cfgblk));\n"
         "    cfgblk[0] = 1;  // stream immediately; no Chokistream handshake\n"
-        "    cfgblk[1] = 42; // lighter JPEGs for Old 3DS motion\n"
+        "    cfgblk[1] = 58; // workflow tunes this for Old 3DS\n"
         "    cfgblk[3] = 3;  // both screens\n"
         "    cfgblk[4] = 0;  // JPEG\n",
         "browser defaults",
@@ -175,7 +175,7 @@ static void sendStreamHeaders(int fd)
                         sendStreamHeaders(cli);
                         gBrowserStream = true;
                         cfgblk[0] = 1;
-                        cfgblk[1] = 42;
+                        cfgblk[1] = 58;
                         cfgblk[3] = 3;
                         cfgblk[4] = 0;
                     }
@@ -198,16 +198,51 @@ static void sendStreamHeaders(int fd)
     end_new = '''    gBrowserStream = false;\n    threadrunning = 0;\n}\n\n\nstatic FILE* f = nullptr;'''
     text = replace_once(text, end_old, end_new, "clear browser stream flag")
 
-    # Old 3DS tuning: four larger chunks instead of eight tiny ones. This cuts
-    # per-strip overhead and makes a complete screen arrive much sooner.
-    text = text.replace("limit[0] = 8;", "limit[0] = 4;")
-    text = text.replace("limit[1] = 8;", "limit[1] = 4;")
-    text = text.replace("stride[0] = 50;", "stride[0] = 100;")
-    text = text.replace("stride[1] = 40;", "stride[1] = 80;")
-    text = text.replace("screenbuf_siz = 50 * 240 * 3;", "screenbuf_siz = 100 * 240 * 3;")
-    text = text.replace("bufsoc_siz = 0xC000;", "bufsoc_siz = 0x10000;")
-    text = text.replace("netfunc_thread_priority = 0x14;", "netfunc_thread_priority = 0x20;")
-    text = text.replace("svcSleepThread(5e6);", "svcSleepThread(2e6);")
+    # Preserve ChirunoMod's proven Old-3DS capture geometry. Casts are
+    # deliberate so later build-time tuning cannot accidentally rewrite these.
+    text = text.replace("limit[0] = 8;", "limit[0] = (u32)8;")
+    text = text.replace("limit[1] = 8;", "limit[1] = (u32)8;")
+    text = text.replace("stride[0] = 50;", "stride[0] = (u32)50;")
+    text = text.replace("stride[1] = 40;", "stride[1] = (u32)40;")
+    text = text.replace("screenbuf_siz = 50 * 240 * 3;", "screenbuf_siz = ((u32)50 * 240 * 3);")
+    text = text.replace("bufsoc_siz = 0xC000;", "bufsoc_siz = (u32)0xC000;")
+
+    # Complete one whole screen before switching. In dual-screen mode, favor
+    # the top screen 3:1 because that is where gameplay normally happens.
+    text = replace_once(text, "    int scr = 0;", "    int scr = 0;\n    int topBurstFrames = 0;", "top burst counter")
+    old_switch = r'''            if(interlacedRowSwitch == false || cfgblk[5] == 0)
+            {
+                if(cfgblk[3] == 1) // Top Screen Only
+                    scr = 0;
+                else if(cfgblk[3] == 2) // Bottom Screen Only
+                    scr = 1;
+                else if(cfgblk[3] == 3) // Both Screens
+                    scr = !scr;
+            }'''
+    new_switch = r'''            if(interlacedRowSwitch == false || cfgblk[5] == 0)
+            {
+                if(cfgblk[3] == 1) // Top Screen Only
+                    scr = 0;
+                else if(cfgblk[3] == 2) // Bottom Screen Only
+                    scr = 1;
+                else if(cfgblk[3] == 3 && offs[scr] == 0) // Both: switch only after a complete frame
+                {
+                    if(scr == 0)
+                    {
+                        topBurstFrames++;
+                        if(topBurstFrames >= 3)
+                        {
+                            topBurstFrames = 0;
+                            scr = 1;
+                        }
+                    }
+                    else
+                    {
+                        scr = 0;
+                    }
+                }
+            }'''
+    text = replace_once(text, old_switch, new_switch, "whole-frame screen scheduling")
 
     main_path.write_text(text, encoding="utf-8")
 
@@ -224,41 +259,15 @@ static void sendStreamHeaders(int fd)
 
 
 def make_soft_banner_sound(path: Path):
-    # A single soft swoosh with a warm tail, followed by silence. The HOME Menu
-    # loops banner audio, so the long quiet tail prevents the old BIBIBIBI effect.
+    # Intentionally silent. HOME Menu loops banner audio, and every attempted
+    # decorative sound became an annoying repeated BIBIBIBI in real hardware.
     rate = 22050
-    duration = 2.9
-    rng = random.Random(0x3D5)
-    lp = 0.0
-    phase = 0.0
-    frames = []
-    for i in range(int(rate * duration)):
-        t = i / rate
-        sample = 0.0
-        if t < 0.72:
-            white = rng.uniform(-1.0, 1.0)
-            lp = lp * 0.92 + white * 0.08
-            env = math.sin(math.pi * min(1.0, t / 0.72)) ** 2
-            sample += lp * env * 0.30
-            freq = 180.0 + 260.0 * (t / 0.72)
-            phase += 2.0 * math.pi * freq / rate
-            sample += math.sin(phase) * env * 0.11
-        if 0.32 <= t < 1.05:
-            x = t - 0.32
-            env = math.exp(-4.2 * x) * min(1.0, x / 0.025)
-            sample += env * (
-                0.15 * math.sin(2*math.pi*392.0*x) +
-                0.10 * math.sin(2*math.pi*523.25*x) +
-                0.07 * math.sin(2*math.pi*659.25*x)
-            )
-        sample = max(-1.0, min(1.0, sample))
-        frames.append(struct.pack('<h', int(sample * 32767)))
-
+    seconds = 2
     with wave.open(str(path), 'wb') as w:
         w.setnchannels(1)
         w.setsampwidth(2)
         w.setframerate(rate)
-        w.writeframes(b''.join(frames))
+        w.writeframes(struct.pack('<h', 0) * (rate * seconds))
 
 
 def patch_loader():
@@ -321,8 +330,8 @@ def patch_loader():
     m = re.sub(r"^APP_PRODUCT_CODE\s*:=.*$", "APP_PRODUCT_CODE:=  CTR-N-3DSL", m, count=1, flags=re.M)
     m = re.sub(r"^APP_UNIQUE_ID\s*:=.*$", "APP_UNIQUE_ID   :=  0xCFAAF", m, count=1, flags=re.M)
 
-    # Use our own longer non-beepy banner sound; the workflow's legacy
-    # banner.wav is intentionally ignored.
+    # Use our own banner audio file so the inherited Chiruno/ChLoad sound can
+    # never sneak back in. The file itself is intentionally silent.
     make_soft_banner_sound(ROOT / "HzLoad" / "assets" / "3dslink.wav")
     m = m.replace("$(TOPDIR)/assets/banner.wav", "$(TOPDIR)/assets/3dslink.wav")
     m = m.replace("-a $(TOPDIR)/assets/banner.wav", "-a $(TOPDIR)/assets/3dslink.wav")
