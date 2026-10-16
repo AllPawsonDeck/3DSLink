@@ -41,11 +41,9 @@ jobs:
           curl -fL --retry 3 -o /tmp/devkitarm-r46.tar.bz2 \
             'https://wii.leseratte10.de/devkitPro/devkitARM/r46%20%282017%29/devkitARM_r46-x86_64-linux.tar.bz2'
           tar -xjf /tmp/devkitarm-r46.tar.bz2 -C /opt/devkitpro-legacy
-
           curl -fL --retry 3 -o /tmp/libctru-1.2.1.tar.bz2 \
             'https://wii.leseratte10.de/devkitPro/libctru/2017/libctru-1.2.1.tar.bz2'
           tar -xjf /tmp/libctru-1.2.1.tar.bz2 -C /opt/devkitpro-legacy
-
           armgcc="$(find /opt/devkitpro-legacy -type f -name arm-none-eabi-gcc | head -n 1)"
           test -n "$armgcc"
           armroot="$(dirname "$(dirname "$armgcc")")"
@@ -53,7 +51,6 @@ jobs:
             rm -rf /opt/devkitpro-legacy/devkitARM
             ln -s "$armroot" /opt/devkitpro-legacy/devkitARM
           fi
-
           ctru_header="$(find /opt/devkitpro-legacy -type f -path '*/include/3ds.h' | grep -v '/devkitARM/' | head -n 1)"
           test -n "$ctru_header"
           ctruroot="$(dirname "$(dirname "$ctru_header")")"
@@ -61,7 +58,6 @@ jobs:
             rm -rf /opt/devkitpro-legacy/libctru
             ln -s "$ctruroot" /opt/devkitpro-legacy/libctru
           fi
-
           test -x /opt/devkitpro-legacy/devkitARM/bin/arm-none-eabi-gcc
           test -f /opt/devkitpro-legacy/libctru/include/3ds.h
 
@@ -76,94 +72,84 @@ jobs:
           sed -i 's/CFLAGS+="\\"-Drandom()=rand()\\"" //g' Makefile
           make zlib install-zlib
           make libjpeg-turbo install
-          test -f /opt/devkitpro-legacy/portlibs/armv6k/include/turbojpeg.h
-          test -f /opt/devkitpro-legacy/portlibs/armv6k/lib/libz.a
 
       - name: Clone ChirunoMod base
         run: git clone --depth 1 --branch nightly-v4 https://github.com/ChainSwordCS/ChirunoMod.git upstream
 
-      - name: Apply 3DSLink patches and artwork
+      - name: Apply 3DSLink base patches and artwork
         run: |
           python3 scripts/prepare_upstream.py
           cp src/launcher.c upstream/HzLoad/soos/main.c
           base64 -d assets/icon.b64 > /tmp/3dslink-icon.png
           python3 - <<'PY'
           from PIL import Image
-          import wave, struct
-
           src = Image.open('/tmp/3dslink-icon.png').convert('RGBA')
-          src.resize((48, 48), Image.Resampling.LANCZOS).save('upstream/HzLoad/assets/logo.png')
-
-          banner = Image.new('RGBA', (256, 128), (255, 154, 20, 255))
-          art = src.resize((112, 112), Image.Resampling.LANCZOS)
-          banner.alpha_composite(art, ((256 - 112)//2, 8))
+          src.resize((48,48), Image.Resampling.LANCZOS).save('upstream/HzLoad/assets/logo.png')
+          banner = Image.new('RGBA',(256,128),(255,154,20,255))
+          art = src.resize((112,112), Image.Resampling.LANCZOS)
+          banner.alpha_composite(art,((256-112)//2,8))
           banner.convert('RGB').save('upstream/HzLoad/assets/banner.png')
-
-          # Alpha 5: NO HOME Menu banner sound. Previous synthetic sounds
-          # looped into the annoying BIBIBIBI. Silence is intentional.
-          rate = 22050
-          with wave.open('upstream/HzLoad/assets/banner.wav', 'wb') as w:
-              w.setnchannels(1)
-              w.setsampwidth(2)
-              w.setframerate(rate)
-              w.writeframes(struct.pack('<h', 0) * (rate * 2))
           PY
 
-      - name: Patch module runtime behavior
+      - name: Patch whole-frame streaming runtime
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('upstream/soos/main.cpp')
-          s = p.read_text()
+          p=Path('upstream/soos/main.cpp')
+          s=p.read_text()
 
-          # Never hijack the notification LED.
-          s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
-          s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
+          # Keep 3DSLink's LED behavior disabled and listen on all Wi-Fi interfaces.
+          s=s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
+          s=s.replace('sao.sin_addr.s_addr = gethostid();','sao.sin_addr.s_addr = htonl(INADDR_ANY);')
 
-          # Browser stream protocol: Old 3DS now uses two large strips instead
-          # of eight tiny strips. This cuts the complete-frame latency sharply.
-          s = s.replace('u8 parts = (getPakSubtypeB() & 0x08) ? 8 : 1;', 'u8 parts = (getPakSubtypeB() & 0x08) ? 2 : 1;')
-          s = s.replace('limit[0] = 8;', 'limit[0] = 2;')
-          s = s.replace('limit[1] = 8;', 'limit[1] = 2;')
-          s = s.replace('stride[0] = 50;', 'stride[0] = 200;')
-          s = s.replace('stride[1] = 40;', 'stride[1] = 160;')
-          s = s.replace('screenbuf_siz = 50 * 240 * 3;', 'screenbuf_siz = 200 * 240 * 3;')
-          s = s.replace('bufsoc_siz = 0xC000;', 'bufsoc_siz = 0x10000;')
+          # Alpha 6: one complete JPEG per screen. No browser-side pillar assembly.
+          s=s.replace('u8 parts = (getPakSubtypeB() & 0x08) ? (u8)8 : (u8)1;', 'u8 parts = (u8)1;')
+          s=s.replace('limit[0] = (u32)8;', 'limit[0] = (u32)1;')
+          s=s.replace('limit[1] = (u32)8;', 'limit[1] = (u32)1;')
+          s=s.replace('stride[0] = (u32)50;', 'stride[0] = (u32)400;')
+          s=s.replace('stride[1] = (u32)40;', 'stride[1] = (u32)320;')
+          s=s.replace('screenbuf_siz = ((u32)50 * 240 * 3);', 'screenbuf_siz = ((u32)400 * 240 * 3);')
+          s=s.replace('bufsoc_siz = (u32)0xC000;', 'bufsoc_siz = (u32)0x18000;')
 
-          # Encode the framebuffer's native BGR channel order correctly in the
-          # JPEG itself. This removes the expensive per-pixel browser color fix.
-          s = s.replace('tjpixelformat = TJPF_RGB;', 'tjpixelformat = TJPF_BGR;')
+          # Correct framebuffer channel order before JPEG transmission.
+          s=s.replace('tjpixelformat = TJPF_RGB;', 'tjpixelformat = TJPF_BGR;')
 
-          # Keep audio healthy while allowing more capture throughput than a4.
-          s = s.replace('netfunc_thread_priority = 0x14;', 'netfunc_thread_priority = 0x20;')
-          s = s.replace('svcSleepThread(5e6);', 'svcSleepThread(3e6);')
-          s = s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 38;')
+          # Favor motion while preserving the lower-priority thread that fixed crunchy audio.
+          s=s.replace('netfunc_thread_priority = 0x14;', 'netfunc_thread_priority = 0x20;')
+          s=s.replace('svcSleepThread(5e6);', 'svcSleepThread(2e6);')
+          s=s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 30;')
 
-          # Accept stream query parameters. Top-only mode now actually stops
-          # capturing the bottom screen, rather than merely hiding it in CSS.
-          s = s.replace('if(strstr(request, "GET /stream ") == request)', 'if(strncmp(request, "GET /stream", 11) == 0)')
-          old = '''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 38;\n                        cfgblk[3] = 3;\n                        cfgblk[4] = 0;'''
-          new = '''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 38;\n                        cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;'''
-          if old not in s:
-              raise SystemExit('stream settings patch point missing')
-          s = s.replace(old, new, 1)
+          # Top-only mode truly stops bottom-screen capture.
+          s=s.replace('if(strstr(request, "GET /stream ") == request)', 'if(strncmp(request, "GET /stream", 11) == 0)')
+          old='''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 30;\n                        cfgblk[3] = 3;\n                        cfgblk[4] = 0;'''
+          new='''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 30;\n                        cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;'''
+          if old in s:
+              s=s.replace(old,new,1)
+          else:
+              s=s.replace('cfgblk[3] = 3;\n                        cfgblk[4] = 0;', 'cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;',1)
 
           p.write_text(s)
 
-          p = Path('upstream/Makefile')
-          m = p.read_text().replace('-D__3DS__', '-DARM11 -D_3DS')
+          p=Path('upstream/Makefile')
+          m=p.read_text().replace('-D__3DS__','-DARM11 -D_3DS')
           p.write_text(m)
           PY
 
-      - name: Patch launcher for current libctru
+      - name: Patch launcher and remove HOME Menu audio completely
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('upstream/HzLoad/Makefile')
-          m = p.read_text()
-          m = m.replace('LIBS\t:= -lctru -lm', 'LIBS\t:= -lcitro2d -lcitro3d -lctru -lm')
-          m = m.replace('$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/image.bin', '$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/banner.bin $(TOPDIR)/$(BUILD)/image.bin')
-          m = m.replace(' -icon $(TOPDIR)/$(BUILD)/image.bin -DAPP_TITLE=', ' -icon $(TOPDIR)/$(BUILD)/image.bin -banner $(TOPDIR)/$(BUILD)/banner.bin -DAPP_TITLE=')
+          p=Path('upstream/HzLoad/Makefile')
+          m=p.read_text()
+          m=m.replace('LIBS\t:= -lctru -lm','LIBS\t:= -lcitro2d -lcitro3d -lctru -lm')
+          m=m.replace('$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/image.bin','$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/banner.bin $(TOPDIR)/$(BUILD)/image.bin')
+          m=m.replace(' -icon $(TOPDIR)/$(BUILD)/image.bin -DAPP_TITLE=',' -icon $(TOPDIR)/$(BUILD)/image.bin -banner $(TOPDIR)/$(BUILD)/banner.bin -DAPP_TITLE=')
+
+          # No WAV at all. This prevents the HOME Menu from looping any banner sound.
+          m=m.replace('$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER) $(TOPDIR)/assets/3dslink.wav','$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER)')
+          m=m.replace('$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER) $(TOPDIR)/assets/banner.wav','$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER)')
+          m=m.replace('@bannertool makebanner -i $(TOPDIR)/$(BANNER) -a $(TOPDIR)/assets/3dslink.wav -o $(TOPDIR)/$(BUILD)/banner.bin','@bannertool makebanner -i $(TOPDIR)/$(BANNER) -o $(TOPDIR)/$(BUILD)/banner.bin')
+          m=m.replace('@bannertool makebanner -i $(TOPDIR)/$(BANNER) -a $(TOPDIR)/assets/banner.wav -o $(TOPDIR)/$(BUILD)/banner.bin','@bannertool makebanner -i $(TOPDIR)/$(BANNER) -o $(TOPDIR)/$(BUILD)/banner.bin')
           p.write_text(m)
           PY
 
@@ -201,7 +187,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha-5
+          name: 3DSLink-alpha-6
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
@@ -212,11 +198,11 @@ jobs:
       - name: Publish alpha release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v0.1.0-alpha.5
+          TAG: v0.1.0-alpha.6
         run: |
-          NOTES='Fifth hardware-test alpha. HOME Menu banner audio is intentionally silent. Old 3DS capture uses 2 strips per screen instead of 8, JPEG color order is corrected before transmission, browser decoding no longer blocks the network reader, and Top only mode now truly disables bottom-screen capture for higher FPS. Install BOTH CIAs.'
+          NOTES='Sixth hardware-test alpha. Old 3DS now captures and transmits ONE complete JPEG frame per screen instead of separate pillars. Top-only mode disables bottom capture. JPEG quality is tuned for motion. HOME Menu banner audio is removed entirely rather than replaced with a silent WAV. This whole-frame path uses more RAM than the strip path, so it is experimental. Install BOTH CIAs.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
-            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 5' --prerelease --notes "$NOTES"
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 6' --prerelease --notes "$NOTES"
           fi
