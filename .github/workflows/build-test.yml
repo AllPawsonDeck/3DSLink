@@ -89,7 +89,7 @@ jobs:
           base64 -d assets/icon.b64 > /tmp/3dslink-icon.png
           python3 - <<'PY'
           from PIL import Image
-          import wave, struct, math
+          import wave, struct
 
           src = Image.open('/tmp/3dslink-icon.png').convert('RGBA')
           src.resize((48, 48), Image.Resampling.LANCZOS).save('upstream/HzLoad/assets/logo.png')
@@ -99,32 +99,14 @@ jobs:
           banner.alpha_composite(art, ((256 - 112)//2, 8))
           banner.convert('RGB').save('upstream/HzLoad/assets/banner.png')
 
-          # Short, soft two-note "link connected" chime instead of the harsh
-          # repeated electronic beep from the inherited banner assets.
+          # Alpha 5: NO HOME Menu banner sound. Previous synthetic sounds
+          # looped into the annoying BIBIBIBI. Silence is intentional.
           rate = 22050
-          duration = 0.58
-          frames = []
-          notes = [(0.00, 0.25, 523.25), (0.20, 0.38, 783.99)]  # C5 -> G5
-          for i in range(int(rate * duration)):
-              t = i / rate
-              sample = 0.0
-              for start, length, freq in notes:
-                  x = t - start
-                  if 0 <= x < length:
-                      attack = min(1.0, x / 0.018)
-                      release = min(1.0, (length - x) / 0.10)
-                      env = attack * release * math.exp(-2.2 * x)
-                      # Fundamental + a tiny harmonic gives it a chime character
-                      # without sounding like a square-wave "BIBIBIBI".
-                      sample += env * (math.sin(2*math.pi*freq*x) + 0.18*math.sin(2*math.pi*freq*2*x))
-              sample = max(-1.0, min(1.0, sample * 0.34))
-              frames.append(struct.pack('<h', int(sample * 32767)))
-
           with wave.open('upstream/HzLoad/assets/banner.wav', 'wb') as w:
               w.setnchannels(1)
               w.setsampwidth(2)
               w.setframerate(rate)
-              w.writeframes(b''.join(frames))
+              w.writeframes(struct.pack('<h', 0) * (rate * 2))
           PY
 
       - name: Patch module runtime behavior
@@ -133,13 +115,39 @@ jobs:
           from pathlib import Path
           p = Path('upstream/soos/main.cpp')
           s = p.read_text()
-          s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n// 3DSLink does not use the console notification LED as a status display.\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
+
+          # Never hijack the notification LED.
+          s = s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
           s = s.replace('sao.sin_addr.s_addr = gethostid();', 'sao.sin_addr.s_addr = htonl(INADDR_ANY);')
-          # Old 3DS: yield more aggressively to the system/audio services.
+
+          # Browser stream protocol: Old 3DS now uses two large strips instead
+          # of eight tiny strips. This cuts the complete-frame latency sharply.
+          s = s.replace('u8 parts = (getPakSubtypeB() & 0x08) ? 8 : 1;', 'u8 parts = (getPakSubtypeB() & 0x08) ? 2 : 1;')
+          s = s.replace('limit[0] = 8;', 'limit[0] = 2;')
+          s = s.replace('limit[1] = 8;', 'limit[1] = 2;')
+          s = s.replace('stride[0] = 50;', 'stride[0] = 200;')
+          s = s.replace('stride[1] = 40;', 'stride[1] = 160;')
+          s = s.replace('screenbuf_siz = 50 * 240 * 3;', 'screenbuf_siz = 200 * 240 * 3;')
+          s = s.replace('bufsoc_siz = 0xC000;', 'bufsoc_siz = 0x10000;')
+
+          # Encode the framebuffer's native BGR channel order correctly in the
+          # JPEG itself. This removes the expensive per-pixel browser color fix.
+          s = s.replace('tjpixelformat = TJPF_RGB;', 'tjpixelformat = TJPF_BGR;')
+
+          # Keep audio healthy while allowing more capture throughput than a4.
           s = s.replace('netfunc_thread_priority = 0x14;', 'netfunc_thread_priority = 0x20;')
-          s = s.replace('svcSleepThread(5e6);', 'svcSleepThread(8e6);')
-          # Slightly lighter JPEGs reduce CPU and Wi-Fi pressure without making the stream unreadable.
-          s = s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 48;')
+          s = s.replace('svcSleepThread(5e6);', 'svcSleepThread(3e6);')
+          s = s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 38;')
+
+          # Accept stream query parameters. Top-only mode now actually stops
+          # capturing the bottom screen, rather than merely hiding it in CSS.
+          s = s.replace('if(strstr(request, "GET /stream ") == request)', 'if(strncmp(request, "GET /stream", 11) == 0)')
+          old = '''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 38;\n                        cfgblk[3] = 3;\n                        cfgblk[4] = 0;'''
+          new = '''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 38;\n                        cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;'''
+          if old not in s:
+              raise SystemExit('stream settings patch point missing')
+          s = s.replace(old, new, 1)
+
           p.write_text(s)
 
           p = Path('upstream/Makefile')
@@ -193,7 +201,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 3DSLink-alpha-4
+          name: 3DSLink-alpha-5
           path: |
             upstream/HzLoad/3DSLink.cia
             upstream/3DSLinkModule.cia
@@ -204,11 +212,11 @@ jobs:
       - name: Publish alpha release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v0.1.0-alpha.4
+          TAG: v0.1.0-alpha.5
         run: |
-          NOTES='Fourth hardware-test alpha. Fixes Old 3DS browser orientation/strip ordering, reduces audio crackle by lowering the streaming thread priority and stream load, and replaces the harsh inherited banner beep with a short soft 3DSLink connection chime. Install BOTH 3DSLink.cia and 3DSLinkModule.cia with FBI.'
+          NOTES='Fifth hardware-test alpha. HOME Menu banner audio is intentionally silent. Old 3DS capture uses 2 strips per screen instead of 8, JPEG color order is corrected before transmission, browser decoding no longer blocks the network reader, and Top only mode now truly disables bottom-screen capture for higher FPS. Install BOTH CIAs.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
-            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 4' --prerelease --notes "$NOTES"
+            gh release create "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --target "$GITHUB_SHA" --title '3DSLink v0.1.0 alpha 5' --prerelease --notes "$NOTES"
           fi
