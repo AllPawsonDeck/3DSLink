@@ -97,12 +97,10 @@ jobs:
           from pathlib import Path
           p=Path('upstream/soos/main.cpp')
           s=p.read_text()
-
-          # Keep 3DSLink's LED behavior disabled and listen on all Wi-Fi interfaces.
           s=s.replace('#include "3dslink_web.h"', '#include "3dslink_web.h"\n\n#define PatStay(...) ((void)0)\n#define PatApply() ((void)0)')
           s=s.replace('sao.sin_addr.s_addr = gethostid();','sao.sin_addr.s_addr = htonl(INADDR_ANY);')
 
-          # Alpha 6: one complete JPEG per screen. No browser-side pillar assembly.
+          # Alpha 6: one complete JPEG per screen; no pillar reconstruction.
           s=s.replace('u8 parts = (getPakSubtypeB() & 0x08) ? (u8)8 : (u8)1;', 'u8 parts = (u8)1;')
           s=s.replace('limit[0] = (u32)8;', 'limit[0] = (u32)1;')
           s=s.replace('limit[1] = (u32)8;', 'limit[1] = (u32)1;')
@@ -111,15 +109,11 @@ jobs:
           s=s.replace('screenbuf_siz = ((u32)50 * 240 * 3);', 'screenbuf_siz = ((u32)400 * 240 * 3);')
           s=s.replace('bufsoc_siz = (u32)0xC000;', 'bufsoc_siz = (u32)0x18000;')
 
-          # Correct framebuffer channel order before JPEG transmission.
           s=s.replace('tjpixelformat = TJPF_RGB;', 'tjpixelformat = TJPF_BGR;')
-
-          # Favor motion while preserving the lower-priority thread that fixed crunchy audio.
           s=s.replace('netfunc_thread_priority = 0x14;', 'netfunc_thread_priority = 0x20;')
           s=s.replace('svcSleepThread(5e6);', 'svcSleepThread(2e6);')
           s=s.replace('cfgblk[1] = 58;', 'cfgblk[1] = 30;')
 
-          # Top-only mode truly stops bottom-screen capture.
           s=s.replace('if(strstr(request, "GET /stream ") == request)', 'if(strncmp(request, "GET /stream", 11) == 0)')
           old='''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 30;\n                        cfgblk[3] = 3;\n                        cfgblk[4] = 0;'''
           new='''                        gBrowserStream = true;\n                        cfgblk[0] = 1;\n                        cfgblk[1] = 30;\n                        cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;'''
@@ -127,7 +121,6 @@ jobs:
               s=s.replace(old,new,1)
           else:
               s=s.replace('cfgblk[3] = 3;\n                        cfgblk[4] = 0;', 'cfgblk[3] = strstr(request, "screen=top") ? 1 : 3;\n                        cfgblk[4] = 0;',1)
-
           p.write_text(s)
 
           p=Path('upstream/Makefile')
@@ -135,7 +128,7 @@ jobs:
           p.write_text(m)
           PY
 
-      - name: Patch launcher and remove HOME Menu audio completely
+      - name: Patch launcher for current libctru
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -144,12 +137,9 @@ jobs:
           m=m.replace('LIBS\t:= -lctru -lm','LIBS\t:= -lcitro2d -lcitro3d -lctru -lm')
           m=m.replace('$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/image.bin','$(OUTPUT).cia: $(OUTPUT)-stripped.elf $(TOPDIR)/$(BUILD)/banner.bin $(TOPDIR)/$(BUILD)/image.bin')
           m=m.replace(' -icon $(TOPDIR)/$(BUILD)/image.bin -DAPP_TITLE=',' -icon $(TOPDIR)/$(BUILD)/image.bin -banner $(TOPDIR)/$(BUILD)/banner.bin -DAPP_TITLE=')
-
-          # No WAV at all. This prevents the HOME Menu from looping any banner sound.
-          m=m.replace('$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER) $(TOPDIR)/assets/3dslink.wav','$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER)')
-          m=m.replace('$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER) $(TOPDIR)/assets/banner.wav','$(TOPDIR)/$(BUILD)/banner.bin: $(TOPDIR)/$(BANNER)')
-          m=m.replace('@bannertool makebanner -i $(TOPDIR)/$(BANNER) -a $(TOPDIR)/assets/3dslink.wav -o $(TOPDIR)/$(BUILD)/banner.bin','@bannertool makebanner -i $(TOPDIR)/$(BANNER) -o $(TOPDIR)/$(BUILD)/banner.bin')
-          m=m.replace('@bannertool makebanner -i $(TOPDIR)/$(BANNER) -a $(TOPDIR)/assets/banner.wav -o $(TOPDIR)/$(BUILD)/banner.bin','@bannertool makebanner -i $(TOPDIR)/$(BANNER) -o $(TOPDIR)/$(BUILD)/banner.bin')
+          # prepare_upstream.py creates 3dslink.wav as pure digital silence.
+          # Bannertool requires an audio input for this banner format, so keep
+          # that silent WAV rather than omitting audio and breaking the build.
           p.write_text(m)
           PY
 
@@ -200,7 +190,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: v0.1.0-alpha.6
         run: |
-          NOTES='Sixth hardware-test alpha. Old 3DS now captures and transmits ONE complete JPEG frame per screen instead of separate pillars. Top-only mode disables bottom capture. JPEG quality is tuned for motion. HOME Menu banner audio is removed entirely rather than replaced with a silent WAV. This whole-frame path uses more RAM than the strip path, so it is experimental. Install BOTH CIAs.'
+          NOTES='Sixth hardware-test alpha. Old 3DS now captures and transmits ONE complete JPEG frame per screen instead of separate pillars. Top-only mode disables bottom capture. JPEG quality is tuned for motion. HOME Menu banner audio is pure digital silence. This whole-frame path uses more RAM than the strip path, so it is experimental. Install BOTH CIAs.'
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" upstream/HzLoad/3DSLink.cia upstream/3DSLinkModule.cia --clobber
           else
