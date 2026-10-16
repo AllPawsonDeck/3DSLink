@@ -1,106 +1,46 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>3DSLink</title>
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#fff;font-family:Arial,sans-serif}body{display:flex;align-items:center;justify-content:center}.app{width:min(920px,96vw);padding:18px}.toolbar,.popcontrols{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.toolbar{margin-bottom:14px}.popcontrols{margin-top:14px}button{border:0;border-radius:9px;padding:9px 13px;background:#2b2b2b;color:#fff;cursor:pointer}button:hover{background:#3b3b3b}.shell{margin:auto;width:min(760px,94vw)}.half{background:#b21f2d;border-radius:24px;padding:24px;box-shadow:0 10px 30px #0008}.hinge{height:18px;width:78%;margin:auto;background:#6f111b;border-radius:8px}.screen{display:block;background:#000;margin:auto;image-rendering:auto}.top{width:100%;aspect-ratio:400/240}.bottom{width:78%;aspect-ratio:320/240}.clean .half{background:transparent;padding:8px;box-shadow:none}.clean .hinge{display:none}.clean .bottom{width:80%}.toponly .bottomhalf,.toponly .hinge{display:none}.toponly .tophalf{background:transparent;padding:0;box-shadow:none}.toponly .top{width:100%;max-height:94vh}.status{text-align:center;margin-top:10px;color:#aaa;font-size:13px}
-</style>
-</head>
-<body>
-<div class="app">
-  <div class="toolbar"><button onclick="setMode('shell')">3DS</button><button onclick="setMode('clean')">Screens</button><button onclick="setMode('toponly')">Top only</button></div>
-  <div id="shell" class="shell">
-    <div class="half tophalf"><canvas id="top" class="screen top" width="400" height="240"></canvas></div>
-    <div class="hinge"></div>
-    <div class="half bottomhalf"><canvas id="bottom" class="screen bottom" width="320" height="240"></canvas></div>
-  </div>
-  <div class="popcontrols"><button onclick="pop('top')">Pop out top</button><button onclick="pop('bottom')">Pop out bottom</button><button onclick="pop('both')">Pop out both</button></div>
-  <div id="status" class="status">Connecting to 3DS…</div>
-</div>
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#fff;font-family:Arial,sans-serif}body{display:flex;align-items:center;justify-content:center}.app{width:min(920px,96vw);padding:18px}.toolbar,.popcontrols{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.toolbar{margin-bottom:14px}.popcontrols{margin-top:14px}button{border:0;border-radius:9px;padding:9px 13px;background:#2b2b2b;color:#fff;cursor:pointer}button:hover{background:#3b3b3b}.shell{margin:auto;width:min(760px,94vw)}.half{background:#b21f2d;border-radius:24px;padding:24px;box-shadow:0 10px 30px #0008}.hinge{height:18px;width:78%;margin:auto;background:#6f111b;border-radius:8px}.screen{display:block;background:#000;margin:auto}.top{width:100%;aspect-ratio:400/240}.bottom{width:78%;aspect-ratio:320/240}.clean .half{background:transparent;padding:8px;box-shadow:none}.clean .hinge{display:none}.clean .bottom{width:80%}.toponly .bottomhalf,.toponly .hinge{display:none}.toponly .tophalf{background:transparent;padding:0;box-shadow:none}.toponly .top{width:100%;max-height:94vh}.status{text-align:center;margin-top:10px;color:#aaa;font-size:13px}
+</style></head>
+<body><div class="app">
+<div class="toolbar"><button onclick="setMode('shell')">3DS</button><button onclick="setMode('clean')">Screens</button><button onclick="setMode('toponly')">Top only</button></div>
+<div id="shell" class="shell"><div class="half tophalf"><canvas id="top" class="screen top" width="400" height="240"></canvas></div><div class="hinge"></div><div class="half bottomhalf"><canvas id="bottom" class="screen bottom" width="320" height="240"></canvas></div></div>
+<div class="popcontrols"><button onclick="pop('top')">Pop out top</button><button onclick="pop('bottom')">Pop out bottom</button><button onclick="pop('both')">Pop out both</button></div>
+<div id="status" class="status">Connecting to 3DS…</div></div>
 <script>
-function setMode(mode){const s=document.getElementById('shell');s.className='shell';if(mode!=='shell')s.classList.add(mode)}
-
-function paint(ctx,canvas,part,parts,img){
-  const stripW=canvas.width/parts;
-  const x=(parts-1-part)*stripW;
-  ctx.save();
-  ctx.translate(x,canvas.height);
-  ctx.rotate(-Math.PI/2);
-  ctx.drawImage(img,0,0,canvas.height,stripW);
-  ctx.restore();
-}
-
-function swapRB(img){
-  const c=document.createElement('canvas');c.width=img.width;c.height=img.height;
-  const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(img,0,0);
-  const d=x.getImageData(0,0,c.width,c.height),p=d.data;
-  for(let i=0;i<p.length;i+=4){const r=p[i];p[i]=p[i+2];p[i+2]=r}
-  x.putImageData(d,0,0);return c;
-}
-
-const popups=[];
-function pop(which){
-  const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520;
-  const p=window.open('about:blank','3DSLink-'+which,`popup=yes,width=${w},height=${h}`);
-  if(!p)return;
-  const showTop=which!=='bottom',showBottom=which!=='top';
-  p.document.open();
-  p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center}canvas{display:block;background:#000;max-width:100%;object-fit:contain;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${showTop?'<canvas id="pt" width="400" height="240"></canvas>':''}${showBottom?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>
-const B=[{p:0,s:[],m:0},{p:0,s:[],m:0}];
-function rb(i){const c=document.createElement('canvas');c.width=i.width;c.height=i.height;const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(i,0,0);const d=x.getImageData(0,0,c.width,c.height),a=d.data;for(let q=0;q<a.length;q+=4){const r=a[q];a[q]=a[q+2];a[q+2]=r}x.putImageData(d,0,0);return c}
-function pt(c,x,p,n,i){const w=c.width/n,dx=(n-1-p)*w;x.save();x.translate(dx,c.height);x.rotate(-Math.PI/2);x.drawImage(i,0,0,c.height,w);x.restore()}
-async function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;const i=await createImageBitmap(new Blob([j],{type:'image/jpeg'})),z=rb(i);i.close();const b=B[s];if(p===0||b.p!==n){b.p=n;b.s=new Array(n);b.m=0}b.s[p]=z;b.m|=(1<<p);if(b.m===((1<<n)-1)){const x=c.getContext('2d');for(let k=0;k<n;k++)pt(c,x,k,n,b.s[k])}}
-let chain=Promise.resolve();addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')chain=chain.then(()=>d(m.s,m.p,m.n,m.j)).catch(()=>{})});<\/script></body></html>`);
-  p.document.close();
-  popups.push(p);
-}
-
-const topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');
+const statusEl=document.getElementById('status'),topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');
 const topCtx=topCanvas.getContext('2d'),bottomCtx=bottomCanvas.getContext('2d');
-const frameBuf=[{parts:0,strips:[],mask:0},{parts:0,strips:[],mask:0}];
-let topFrames=0,bottomFrames=0,last=performance.now();
+let streamMode='both',controller=null,generation=0,topFrames=0,bottomFrames=0,lastStat=performance.now();
+const buffers=[{parts:0,strips:[],mask:0},{parts:0,strips:[],mask:0}],chains=[Promise.resolve(),Promise.resolve()],popups=[];
 
-async function drawStrip(screen,part,parts,jpg){
-  const img=await createImageBitmap(new Blob([jpg],{type:'image/jpeg'}));
-  const fixed=swapRB(img);img.close();
-  const b=frameBuf[screen];
-  if(part===0||b.parts!==parts){b.parts=parts;b.strips=new Array(parts);b.mask=0}
-  b.strips[part]=fixed;b.mask|=(1<<part);
+function setMode(mode){const s=document.getElementById('shell');s.className='shell';if(mode!=='shell')s.classList.add(mode);const want=mode==='toponly'?'top':'both';if(want!==streamMode){streamMode=want;connect()}}
+function paint(ctx,canvas,part,parts,img){const w=canvas.width/parts,x=(parts-1-part)*w;ctx.save();ctx.translate(x,canvas.height);ctx.rotate(-Math.PI/2);ctx.drawImage(img,0,0,canvas.height,w);ctx.restore()}
 
-  for(let i=popups.length-1;i>=0;i--){if(popups[i].closed){popups.splice(i,1);continue}try{popups[i].postMessage({k:'s',s:screen,p:part,n:parts,j:jpg},'*')}catch(e){}}
-
-  if(b.mask===((1<<parts)-1)){
-    const ctx=screen===0?topCtx:bottomCtx,canvas=screen===0?topCanvas:bottomCanvas;
-    for(let p=0;p<parts;p++)paint(ctx,canvas,p,parts,b.strips[p]);
-    if(screen===0)topFrames++;else bottomFrames++;
-  }
-
-  const now=performance.now();
-  if(now-last>1000){document.getElementById('status').textContent=`Live • top ${topFrames} fps • bottom ${bottomFrames} fps`;topFrames=0;bottomFrames=0;last=now}
+function pop(which){
+ const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520,p=window.open('about:blank','3DSLink-'+which,`popup=yes,width=${w},height=${h}`);if(!p)return;
+ const st=which!=='bottom',sb=which!=='top';p.document.open();p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center}canvas{display:block;background:#000;max-width:100%;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${st?'<canvas id="pt" width="400" height="240"></canvas>':''}${sb?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>const B=[{p:0,s:[],m:0},{p:0,s:[],m:0}],Q=[Promise.resolve(),Promise.resolve()];function pt(c,x,p,n,i){const w=c.width/n,dx=(n-1-p)*w;x.save();x.translate(dx,c.height);x.rotate(-Math.PI/2);x.drawImage(i,0,0,c.height,w);x.restore()}async function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;const i=await createImageBitmap(new Blob([j],{type:'image/jpeg'})),b=B[s];if(p===0||b.p!==n){b.p=n;b.s=new Array(n);b.m=0}b.s[p]=i;b.m|=1<<p;if(b.m===((1<<n)-1)){const x=c.getContext('2d');for(let k=0;k<n;k++){pt(c,x,k,n,b.s[k]);b.s[k].close()}b.m=0}}addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')Q[m.s]=Q[m.s].then(()=>d(m.s,m.p,m.n,m.j)).catch(()=>{})});<\/script></body></html>`);p.document.close();popups.push(p)
 }
 
-async function start(){
-  try{
-    const res=await fetch('/stream',{cache:'no-store'});if(!res.ok||!res.body)throw new Error('stream');
-    document.getElementById('status').textContent='Live';
-    const r=res.body.getReader();let buf=new Uint8Array(0);
-    for(;;){
-      const {value,done}=await r.read();if(done)throw new Error('closed');
-      const n=new Uint8Array(buf.length+value.length);n.set(buf);n.set(value,buf.length);buf=n;
-      for(;;){
-        if(buf.length<12)break;
-        if(buf[0]!==0x33||buf[1]!==0x44||buf[2]!==0x53||buf[3]!==0x4c){buf=buf.slice(1);continue}
-        const screen=buf[4],part=buf[5],parts=buf[6],len=((buf[8]<<24)>>>0)|(buf[9]<<16)|(buf[10]<<8)|buf[11];
-        if(buf.length<12+len)break;
-        const jpg=buf.slice(12,12+len);buf=buf.slice(12+len);
-        await drawStrip(screen,part,parts,jpg);
-      }
-    }
-  }catch(e){document.getElementById('status').textContent='Disconnected — retrying…';setTimeout(start,1200)}
+async function decodeStrip(screen,part,parts,jpg){
+ const img=await createImageBitmap(new Blob([jpg],{type:'image/jpeg'})),b=buffers[screen];
+ if(part===0||b.parts!==parts){for(const old of b.strips)if(old&&old.close)old.close();b.parts=parts;b.strips=new Array(parts);b.mask=0}
+ b.strips[part]=img;b.mask|=1<<part;
+ for(let i=popups.length-1;i>=0;i--){if(popups[i].closed){popups.splice(i,1);continue}try{popups[i].postMessage({k:'s',s:screen,p:part,n:parts,j:jpg},'*')}catch(e){}}
+ if(b.mask===((1<<parts)-1)){
+   const ctx=screen===0?topCtx:bottomCtx,canvas=screen===0?topCanvas:bottomCanvas;
+   for(let p=0;p<parts;p++){paint(ctx,canvas,p,parts,b.strips[p]);b.strips[p].close();b.strips[p]=null}b.mask=0;
+   if(screen===0)topFrames++;else bottomFrames++;
+ }
+ const now=performance.now();if(now-lastStat>1000){statusEl.textContent=`Live • top ${topFrames} fps${streamMode==='both'?` • bottom ${bottomFrames} fps`:''}`;topFrames=bottomFrames=0;lastStat=now}
 }
-start();
-</script>
-</body>
-</html>
+
+function connect(){
+ generation++;const myGen=generation;if(controller)controller.abort();controller=new AbortController();statusEl.textContent='Connecting to 3DS…';
+ (async()=>{try{const path=streamMode==='top'?'/stream?screen=top':'/stream?screen=both',res=await fetch(path,{cache:'no-store',signal:controller.signal});if(!res.ok||!res.body)throw Error('stream');statusEl.textContent='Live';const r=res.body.getReader();let buf=new Uint8Array(0);for(;;){const {value,done}=await r.read();if(done)throw Error('closed');const n=new Uint8Array(buf.length+value.length);n.set(buf);n.set(value,buf.length);buf=n;for(;;){if(buf.length<12)break;if(buf[0]!==0x33||buf[1]!==0x44||buf[2]!==0x53||buf[3]!==0x4c){buf=buf.slice(1);continue}const s=buf[4],p=buf[5],parts=buf[6],len=((buf[8]<<24)>>>0)|(buf[9]<<16)|(buf[10]<<8)|buf[11];if(buf.length<12+len)break;const jpg=buf.slice(12,12+len);buf=buf.slice(12+len);chains[s]=chains[s].then(()=>decodeStrip(s,p,parts,jpg)).catch(()=>{})}}}catch(e){if(myGen!==generation)return;statusEl.textContent='Disconnected — retrying…';setTimeout(()=>{if(myGen===generation)connect()},800)}})()
+}
+connect();
+</script></body></html>
