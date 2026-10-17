@@ -1,0 +1,18 @@
+name: Remove migrated 3DSaber releases
+on:
+  push:
+    paths:
+      - '.github/workflows/cleanup-3dsaber.yml'
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Remove migrated 3DSaber releases and tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete gpt-saber-3ds-v0.1.0 --cleanup-tag -y || true
+          gh release delete gpt-saber-3ds-v0.1.1-fix --cleanup-tag -y || true
