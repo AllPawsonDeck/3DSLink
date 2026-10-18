@@ -71,6 +71,9 @@ void plat_save_settings(const char *buf, int len);
 
 /* ---- logging ----------------------------------------------------------- */
 
+/* Platform sink for each log line (3DS: SD card file, PC: stderr). */
+void plat_log_write(const char *line, int len);
+
 void core_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Copies the recent log (oldest first) into buf, returns length. */
 int  core_log_read(char *buf, int cap);

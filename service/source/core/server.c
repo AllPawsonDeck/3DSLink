@@ -67,9 +67,7 @@ void core_log(const char *fmt, ...)
             log_full = 1;
         }
     }
-#ifdef TDSL_HOST
-    fwrite(line, 1, (size_t)n, stderr);
-#endif
+    plat_log_write(line, n);
 }
 
 int core_log_read(char *buf, int cap)

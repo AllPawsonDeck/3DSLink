@@ -33,6 +33,7 @@ static char state_detail[64];
 static int install_pct;
 static u32 ip;
 static char url[48];
+static char qr_for[48] = "-";
 static int viewers = -1;
 static char top_fps[8], bottom_fps[8], model[16];
 static char log_lines[5][41];
@@ -70,6 +71,10 @@ static void fill_rect(int x0, int y0, int w, int h, u16 color)
 static void draw_qr(void)
 {
     const int area_x = 226, area_y = 32, area = 170;
+    /* Only redraw when the address changes; repainting it flickers. */
+    if (!strcmp(qr_for, url))
+        return;
+    snprintf(qr_for, sizeof(qr_for), "%s", url);
     fill_rect(area_x, area_y, area, area, 0x0000);
     if (!url[0])
         return;
@@ -183,7 +188,10 @@ static int fetch_status(char *body, int cap)
     struct sockaddr_in sa = { 0 };
     sa.sin_family = AF_INET;
     sa.sin_port = htons(PORT);
-    sa.sin_addr.s_addr = ip ? ip : htonl(INADDR_LOOPBACK);
+    static int which;
+    /* Alternate between the Wi-Fi address and loopback in case one of them
+     * can't reach our own service. */
+    sa.sin_addr.s_addr = ip && !(which++ & 1) ? ip : htonl(INADDR_LOOPBACK);
 
     static char buf[2048];
     int len = 0, result = -1;
@@ -386,8 +394,20 @@ static void ensure_service(bool force_reinstall)
     } else {
         state = ST_FAILED;
         snprintf(state_detail, sizeof(state_detail), "Service did not answer");
-        logf_("Service started but did not answer.");
-        logf_("Is Luma3DS up to date? Try A.");
+        /* Show what the service itself logged. */
+        FILE *f = fopen("sdmc:/3ds/3DSLink/log.txt", "r");
+        char line[64];
+        int shown = 0;
+        while (f && fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            logf_("%s", line);
+            shown++;
+        }
+        if (f)
+            fclose(f);
+        if (!shown)
+            logf_("Service wrote no log (it never ran).");
+        logf_("Log: sdmc:/3ds/3DSLink/log.txt");
     }
 }
 

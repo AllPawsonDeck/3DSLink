@@ -31,6 +31,7 @@
 
 #define SETTINGS_DIR  "/3ds/3DSLink"
 #define SETTINGS_PATH "/3ds/3DSLink/settings.txt"
+#define LOG_PATH      "/3ds/3DSLink/log.txt" /* the app shows it when we fail */
 
 /* Main thread stack; libctru carves it out of the heap. */
 u32 __stacksize__ = 0x4000;
@@ -41,6 +42,8 @@ static bool exit_requested;
 static u64 combo_since;
 static FS_Archive sdmc;
 static bool sd_ok;
+static Handle log_file;
+static u64 log_off;
 
 static bool detect_new3ds(void)
 {
@@ -151,6 +154,26 @@ void plat_save_settings(const char *buf, int len)
     FSFILE_Close(f);
 }
 
+void plat_log_write(const char *line, int len)
+{
+    u32 n = 0;
+    if (!sd_ok)
+        return;
+    if (!log_file) {
+        FSUSER_CreateDirectory(sdmc, fsMakePath(PATH_ASCII, "/3ds"), 0);
+        FSUSER_CreateDirectory(sdmc, fsMakePath(PATH_ASCII, SETTINGS_DIR), 0);
+        if (R_FAILED(FSUSER_OpenFile(&log_file, sdmc, fsMakePath(PATH_ASCII, LOG_PATH),
+                                     FS_OPEN_WRITE | FS_OPEN_CREATE, 0))) {
+            log_file = 0;
+            return;
+        }
+        FSFILE_SetSize(log_file, 0);
+        log_off = 0;
+    }
+    FSFILE_Write(log_file, &n, log_off, line, (u32)len, FS_WRITE_FLUSH);
+    log_off += n;
+}
+
 uint32_t plat_net_address(void)
 {
     static u32 addr;
@@ -195,13 +218,16 @@ int main(void)
         R_SUCCEEDED(FSUSER_OpenArchive(&sdmc, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""))))
         sd_ok = true;
 
+    core_log("service %s starting (%s, heap %lu KB)", TDSL_VERSION, new3ds ? "New 3DS" : "Old 3DS",
+             (unsigned long)(new3ds ? N3DS_HEAP : O3DS_HEAP) / 1024);
     if (capture_init() != 0)
         core_log("could not open gsp::Gpu");
 
     u32 soc_size = new3ds ? N3DS_SOC : O3DS_SOC;
     u32 *soc_buf = memalign(0x1000, soc_size);
-    if (!soc_buf || R_FAILED(socInit(soc_buf, soc_size))) {
-        core_log("socket service unavailable");
+    Result soc_rc = soc_buf ? socInit(soc_buf, soc_size) : -1;
+    if (R_FAILED(soc_rc)) {
+        core_log("socInit failed: %08lX", (unsigned long)soc_rc);
         goto out;
     }
 
@@ -224,7 +250,9 @@ int main(void)
         .fps_bottom = new3ds ? 30 : 15,
     };
 
-    if (server_start(&cfg) == 0) {
+    if (server_start(&cfg) != 0)
+        core_log("server_start failed");
+    else {
         Thread t = NULL;
         if (new3ds) {
             /* The New 3DS's third core is usually idle: encode there so
@@ -245,6 +273,9 @@ int main(void)
 out:
     free(soc_buf);
     capture_exit();
+    core_log("service exited");
+    if (log_file)
+        FSFILE_Close(log_file);
     if (sd_ok)
         FSUSER_CloseArchive(sdmc);
     fsExit();

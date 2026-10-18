@@ -139,6 +139,11 @@ int capture_lines(int screen, int first, int count, uint8_t *dst)
     return 0;
 }
 
+void plat_log_write(const char *line, int len)
+{
+    fwrite(line, 1, (size_t)len, stderr);
+}
+
 void capture_end(int screen)
 {
     (void)screen;
