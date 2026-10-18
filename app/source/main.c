@@ -25,7 +25,6 @@
 #define PORT          8080
 #define SOC_SIZE      0x80000
 
-static PrintConsole bottom_con;
 static int state = ST_CHECKING;
 static char state_detail[64];
 static int install_pct;
@@ -33,16 +32,32 @@ static u32 ip;
 static char address[32]; /* "192.168.1.47:8080" */
 static int viewers = -1;
 static char top_fps[8], bottom_fps[8], model[16];
-static char log_lines[6][41];
+
+/* Messages from this app, newest last (shown on the Logs tab). */
+#define APP_LOG_MAX 24
+static char app_log[APP_LOG_MAX][64];
+static int app_log_n;
+
+/* Bottom screen state. */
+static int tab = TAB_HOME;
+static int pressed = BTN_NONE;
+static int scroll;
+#define LOG_LINES_MAX 120
+static char log_text[LOG_LINES_MAX][UI_LOG_COLS + 2];
+static const char *log_ptrs[LOG_LINES_MAX];
+static int log_count;
 
 /* ---- small helpers ---------------------------------------------------------- */
 
 static void logf_(const char *fmt, ...)
 {
-    memmove(log_lines[0], log_lines[1], sizeof(log_lines) - sizeof(log_lines[0]));
+    if (app_log_n == APP_LOG_MAX) {
+        memmove(app_log[0], app_log[1], sizeof(app_log) - sizeof(app_log[0]));
+        app_log_n--;
+    }
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(log_lines[5], sizeof(log_lines[5]), fmt, ap);
+    vsnprintf(app_log[app_log_n++], sizeof(app_log[0]), fmt, ap);
     va_end(ap);
 }
 
@@ -78,25 +93,97 @@ static void draw_top(void)
             fb[x * UI_H + (UI_H - 1 - y)] = canvas[y * UI_W + x];
 }
 
+/* ---- bottom screen ---------------------------------------------------------- */
+
+static u16 bcanvas[UI_BOTTOM_W * UI_H];
+
+static void add_log_line(const char *line)
+{
+    if (log_count == LOG_LINES_MAX) {
+        /* Keep the newest lines. */
+        memmove(log_text[0], log_text[1], sizeof(log_text) - sizeof(log_text[0]));
+        log_count--;
+    }
+    snprintf(log_text[log_count++], sizeof(log_text[0]), "%s", line);
+}
+
+/* Adds text, wrapped to the width of the Logs card. */
+static void add_log_wrapped(const char *text)
+{
+    char chunk[UI_LOG_COLS + 1];
+    size_t len = strlen(text);
+    if (!len) {
+        add_log_line("");
+        return;
+    }
+    for (size_t i = 0; i < len; i += UI_LOG_COLS) {
+        snprintf(chunk, sizeof(chunk), "%.*s", UI_LOG_COLS, text + i);
+        add_log_line(chunk);
+    }
+}
+
+/* Rebuilds the Logs tab: this app's messages, then the service's log file. */
+static void build_logs(void)
+{
+    bool at_end = scroll + UI_LOG_VISIBLE >= log_count;
+    log_count = 0;
+    add_log_line("#This app");
+    for (int i = 0; i < app_log_n; i++)
+        add_log_wrapped(app_log[i]);
+    add_log_line("");
+    add_log_line("#Streaming service");
+    FILE *f = fopen("sdmc:/3ds/3DSLink/log.txt", "r");
+    if (!f) {
+        add_log_line("(no log yet - it hasn't run)");
+    } else {
+        /* Only the end of a long log is interesting. */
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fseek(f, size > 4096 ? size - 4096 : 0, SEEK_SET);
+        char line[160];
+        bool first = size > 4096;
+        while (fgets(line, sizeof(line), f)) {
+            if (first) { /* skip the partial first line */
+                first = false;
+                continue;
+            }
+            line[strcspn(line, "\r\n")] = 0;
+            add_log_wrapped(line);
+        }
+        fclose(f);
+    }
+    for (int i = 0; i < log_count; i++)
+        log_ptrs[i] = log_text[i];
+    int max_scroll = log_count > UI_LOG_VISIBLE ? log_count - UI_LOG_VISIBLE : 0;
+    if (at_end || scroll > max_scroll)
+        scroll = max_scroll; /* follow new lines unless you scrolled up */
+}
+
+static void scroll_by(int lines)
+{
+    int max_scroll = log_count > UI_LOG_VISIBLE ? log_count - UI_LOG_VISIBLE : 0;
+    scroll += lines;
+    if (scroll > max_scroll)
+        scroll = max_scroll;
+    if (scroll < 0)
+        scroll = 0;
+}
+
 static void draw_bottom(void)
 {
-    consoleSelect(&bottom_con);
-    printf("\x1b[2;2H\x1b[33;1mButtons\x1b[0m");
-    printf("\x1b[4;3H\x1b[36mA\x1b[0m      Restart streaming");
-    printf("\x1b[5;3H\x1b[36mX\x1b[0m      Turn streaming off");
-    printf("\x1b[6;3H\x1b[36mSTART\x1b[0m  Close this app");
-    printf("\x1b[7;10H(streaming keeps running)");
-
-    printf("\x1b[10;2H\x1b[33;1mTips\x1b[0m");
-    printf("\x1b[12;3H- Click \"Pop out\" in Chrome to share");
-    printf("\x1b[13;5Hthe game in Discord.");
-    printf("\x1b[14;3H- To stop streaming during a game,");
-    printf("\x1b[15;5Hhold START + SELECT for 2 seconds.");
-    printf("\x1b[16;3H- Hold L + R while opening this app");
-    printf("\x1b[17;5Hto reinstall the streaming service.");
-
-    for (int i = 0; i < 6; i++)
-        printf("\x1b[%d;2H\x1b[37m%-38.38s\x1b[0m", 23 + i, log_lines[i]);
+    ui_bottom b = {
+        .tab = tab,
+        .streaming_on = state != ST_STOPPED,
+        .pressed = pressed,
+        .lines = log_ptrs,
+        .line_count = log_count,
+        .scroll = scroll,
+    };
+    ui_draw_bottom(&b, bcanvas, consoleGetDefault()->font.gfx);
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);
+    for (int x = 0; x < UI_BOTTOM_W; x++)
+        for (int y = 0; y < UI_H; y++)
+            fb[x * UI_H + (UI_H - 1 - y)] = bcanvas[y * UI_BOTTOM_W + x];
 }
 
 static void draw(void)
@@ -340,20 +427,10 @@ static void ensure_service(bool force_reinstall)
     } else {
         state = ST_FAILED;
         snprintf(state_detail, sizeof(state_detail), "Service did not answer");
+        logf_("The streaming service didn't answer.");
         /* Show what the service itself logged. */
-        FILE *f = fopen("sdmc:/3ds/3DSLink/log.txt", "r");
-        char line[64];
-        int shown = 0;
-        while (f && fgets(line, sizeof(line), f)) {
-            line[strcspn(line, "\r\n")] = 0;
-            logf_("%s", line);
-            shown++;
-        }
-        if (f)
-            fclose(f);
-        if (!shown)
-            logf_("Service wrote no log (it never ran).");
-        logf_("Log: sdmc:/3ds/3DSLink/log.txt");
+        tab = TAB_LOGS;
+        build_logs();
     }
 }
 
@@ -362,12 +439,14 @@ static void ensure_service(bool force_reinstall)
 int main(void)
 {
     gfxInitDefault();
-    consoleInit(GFX_BOTTOM, &bottom_con);
-    /* Top screen: single-buffered RGB565, drawn by draw_top(). */
+    /* Both screens: single-buffered RGB565, drawn by draw_top/draw_bottom. */
     gfxSetScreenFormat(GFX_TOP, GSP_RGB565_OES);
+    gfxSetScreenFormat(GFX_BOTTOM, GSP_RGB565_OES);
     gfxSetDoubleBuffering(GFX_TOP, false);
+    gfxSetDoubleBuffering(GFX_BOTTOM, false);
     gfxSwapBuffersGpu();
     gspWaitForVBlank();
+    hidSetRepeatParameters(300, 60);
 
     hidScanInput();
     bool force = (hidKeysHeld() & (KEY_L | KEY_R)) == (KEY_L | KEY_R);
@@ -385,33 +464,70 @@ int main(void)
     u64 last_poll = 0;
     while (aptMainLoop()) {
         hidScanInput();
-        u32 down = hidKeysDown();
-        if (down & KEY_START)
+        u32 down = hidKeysDown(), held = hidKeysHeld(), repeat = hidKeysDownRepeat();
+        bool changed = down != 0;
+
+        /* Touch: highlight what's under the stylus and act on it right away. */
+        int tap = BTN_NONE;
+        if (down & KEY_TOUCH) {
+            touchPosition t;
+            hidTouchRead(&t);
+            ui_bottom hit_state = { .tab = tab };
+            tap = pressed = ui_bottom_hit(&hit_state, t.px, t.py);
+        } else if (!(held & KEY_TOUCH) && pressed != BTN_NONE) {
+            pressed = BTN_NONE;
+            changed = true;
+        }
+
+        if ((down & KEY_START) || tap == BTN_EXIT)
             break;
-        if (down & KEY_A) {
+        if ((down & KEY_A) || tap == BTN_RESTART) {
             logf_("Restarting streaming...");
             stop_service();
             ensure_service(false);
         }
-        if ((down & KEY_X) && state != ST_STOPPED) {
-            stop_service();
-            state = ST_STOPPED;
-            state_detail[0] = 0;
-            viewers = -1;
-            logf_("Streaming turned off.");
+        if ((down & KEY_X) || tap == BTN_TOGGLE) {
+            if (state == ST_STOPPED) {
+                logf_("Turning streaming on...");
+                ensure_service(false);
+            } else {
+                stop_service();
+                state = ST_STOPPED;
+                state_detail[0] = 0;
+                viewers = -1;
+                logf_("Streaming turned off.");
+            }
+        }
+        if ((down & KEY_L) || tap == BTN_TAB_HOME)
+            tab = TAB_HOME;
+        if ((down & KEY_R) || tap == BTN_TAB_LOGS) {
+            if (tab != TAB_LOGS)
+                scroll = 1 << 30; /* open at the newest lines */
+            tab = TAB_LOGS;
+            build_logs();
+        }
+        if (tab == TAB_LOGS) {
+            if ((repeat & KEY_DUP) || tap == BTN_SCROLL_UP)
+                scroll_by(tap == BTN_SCROLL_UP ? -UI_LOG_VISIBLE / 2 : -1);
+            if ((repeat & KEY_DDOWN) || tap == BTN_SCROLL_DOWN)
+                scroll_by(tap == BTN_SCROLL_DOWN ? UI_LOG_VISIBLE / 2 : 1);
+            changed |= (repeat & (KEY_DUP | KEY_DDOWN)) != 0;
         }
 
-        /* Redraw once a second (and after button presses); the console and
-         * QR code are drawn straight into the framebuffer. */
+        /* Redraw once a second, and right away after any input. */
         u64 now = osGetTime();
-        if (down || now - last_poll >= 1000) {
-            last_poll = now;
-            refresh_ip();
-            if (state == ST_RUNNING) {
-                if (update_status(NULL, 0))
-                    state_detail[0] = 0;
-                else if (ip)
-                    snprintf(state_detail, sizeof(state_detail), "Not answering right now");
+        if (changed || now - last_poll >= 1000) {
+            if (now - last_poll >= 1000) {
+                last_poll = now;
+                refresh_ip();
+                if (state == ST_RUNNING) {
+                    if (update_status(NULL, 0))
+                        state_detail[0] = 0;
+                    else if (ip)
+                        snprintf(state_detail, sizeof(state_detail), "Not answering right now");
+                }
+                if (tab == TAB_LOGS)
+                    build_logs();
             }
             draw();
         }

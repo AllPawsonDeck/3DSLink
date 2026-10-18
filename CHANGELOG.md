@@ -6,6 +6,17 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.7 (2026-10-18)
+
+- **New bottom screen.** Big buttons you can tap (or press A, X or START):
+  Restart streaming, Turn streaming off/on, and Close this app.
+- **New "Logs" tab** on the side of the bottom screen (tap it or press R).
+  It shows what the app and the streaming service have been doing, so
+  problems can be explained. Scroll with the D-pad or the Up/Down buttons;
+  "Home" (or L) goes back. If the service doesn't start, the app opens the
+  logs for you.
+- X now turns streaming back on as well as off.
+
 ## 0.2.6 (2026-10-18)
 
 - **Fixed (hopefully):** the streaming service could never open its port and

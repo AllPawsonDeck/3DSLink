@@ -1,6 +1,6 @@
 /*
- * 3DSLink app: top screen. Everything is drawn into an off-screen canvas so
- * the app can copy a finished frame to the LCD at once (no flicker).
+ * 3DSLink app screens. Everything is drawn into an off-screen canvas so the
+ * app can copy a finished frame to the LCD at once (no flicker).
  */
 #include <stdio.h>
 #include <string.h>
@@ -18,15 +18,17 @@
 #define C_YELLOW RGB(245, 185, 65)
 #define C_RED    RGB(240, 100, 100)
 #define C_CYAN   RGB(110, 220, 255)
+#define C_PRESS  RGB(52, 62, 76)
 
 static uint16_t *canvas;
+static int cw; /* canvas width: 400 (top) or 320 (bottom) */
 static const uint8_t *font;
 
 static void rect(int x, int y, int w, int h, uint16_t c)
 {
-    for (int yy = y < 0 ? 0 : y; yy < y + h && yy < 240; yy++)
-        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < 400; xx++)
-            canvas[yy * 400 + xx] = c;
+    for (int yy = y < 0 ? 0 : y; yy < y + h && yy < UI_H; yy++)
+        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < cw; xx++)
+            canvas[yy * cw + xx] = c;
 }
 
 static void disc(int cx, int cy, int r, uint16_t c)
@@ -56,12 +58,13 @@ static void text(int x, int y, int scale, uint16_t c, const char *s)
 
 static void text_center(int y, int scale, uint16_t c, const char *s)
 {
-    text((400 - text_w(s, scale)) / 2, y, scale, c, s);
+    text((cw - text_w(s, scale)) / 2, y, scale, c, s);
 }
 
 void ui_draw_top(const ui_state *ui, uint16_t *out, const uint8_t *font_gfx)
 {
     canvas = out;
+    cw = UI_W;
     font = font_gfx;
 
     rect(0, 0, 400, 240, C_BG);
@@ -118,7 +121,7 @@ void ui_draw_top(const ui_state *ui, uint16_t *out, const uint8_t *font_gfx)
     } else if (ui->state == ST_FAILED) {
         text(x, 86, 1, C_TEXT, "The streaming service didn't start.");
         text(x, 110, 1, C_TEXT, "Press A to try again.");
-        text(x, 140, 1, C_MUTED, "Details are on the bottom screen.");
+        text(x, 140, 1, C_MUTED, "Tap \"Logs\" on the bottom screen to see why.");
     } else {
         text(x, 92, 1, C_TEXT, "Starting the streaming service...");
         text(x, 116, 1, C_MUTED, "This takes a few seconds.");
@@ -136,3 +139,112 @@ void ui_draw_top(const ui_state *ui, uint16_t *out, const uint8_t *font_gfx)
     }
 }
 
+
+/* ---- bottom screen ---------------------------------------------------------- */
+
+#define SIDE_X   256 /* the Home/Logs tabs live in the right-hand column */
+#define CONTENT  (SIDE_X)
+
+typedef struct {
+    int x, y, w, h;
+} box;
+
+static const box b_buttons[3] = { { 8, 30, 240, 52 }, { 8, 88, 240, 52 }, { 8, 146, 240, 52 } };
+static const box b_tab_home = { SIDE_X, 0, 64, 120 };
+static const box b_tab_logs = { SIDE_X, 120, 64, 120 };
+static const box b_up = { 8, 212, 116, 24 };
+static const box b_down = { 132, 212, 116, 24 };
+
+static bool inside(const box *r, int x, int y)
+{
+    return x >= r->x && x < r->x + r->w && y >= r->y && y < r->y + r->h;
+}
+
+int ui_bottom_hit(const ui_bottom *b, int x, int y)
+{
+    if (inside(&b_tab_home, x, y))
+        return BTN_TAB_HOME;
+    if (inside(&b_tab_logs, x, y))
+        return BTN_TAB_LOGS;
+    if (b->tab == TAB_HOME) {
+        for (int i = 0; i < 3; i++)
+            if (inside(&b_buttons[i], x, y))
+                return BTN_RESTART + i;
+    } else {
+        if (inside(&b_up, x, y))
+            return BTN_SCROLL_UP;
+        if (inside(&b_down, x, y))
+            return BTN_SCROLL_DOWN;
+    }
+    return BTN_NONE;
+}
+
+static void tab(const box *r, const char *label, const char *key, bool active, bool pressed)
+{
+    rect(r->x, r->y, r->w, r->h, active ? C_HEADER : pressed ? C_PRESS : C_CARD);
+    rect(r->x, r->y, 1, r->h, C_BG); /* thin divider */
+    uint16_t ink = active ? C_INK : C_TEXT;
+    int cx = r->x + r->w / 2;
+    text(cx - text_w(label, 1) / 2, r->y + r->h / 2 - 10, 1, ink, label);
+    text(cx - text_w(key, 1) / 2, r->y + r->h / 2 + 6, 1, active ? C_INK : C_MUTED, key);
+}
+
+/* A big tappable button with the matching 3DS button shown on the left. */
+static void action(const box *r, const char *key, const char *title, const char *hint, bool pressed)
+{
+    rect(r->x, r->y, r->w, r->h, pressed ? C_PRESS : C_CARD);
+    int kw = text_w(key, 1) + 12;
+    int ky = r->y + (r->h - 18) / 2;
+    rect(r->x + 10, ky, kw, 18, C_HEADER);
+    text(r->x + 16, ky + 5, 1, C_INK, key);
+    int tx = r->x + 10 + kw + 12;
+    text(tx, r->y + 14, 1, C_TEXT, title);
+    text(tx, r->y + 30, 1, C_MUTED, hint);
+}
+
+void ui_draw_bottom(const ui_bottom *b, uint16_t *out, const uint8_t *font_gfx)
+{
+    canvas = out;
+    cw = UI_BOTTOM_W;
+    font = font_gfx;
+
+    rect(0, 0, UI_BOTTOM_W, UI_H, C_BG);
+    tab(&b_tab_home, "Home", "(L)", b->tab == TAB_HOME, b->pressed == BTN_TAB_HOME);
+    tab(&b_tab_logs, "Logs", "(R)", b->tab == TAB_LOGS, b->pressed == BTN_TAB_LOGS);
+
+    if (b->tab == TAB_HOME) {
+        text(10, 9, 1, C_MUTED, "What do you want to do?");
+        action(&b_buttons[0], "A", "Restart streaming", "If something seems stuck",
+               b->pressed == BTN_RESTART);
+        action(&b_buttons[1], "X", b->streaming_on ? "Turn streaming off" : "Turn streaming on",
+               b->streaming_on ? "Stops sending video" : "Starts sending video",
+               b->pressed == BTN_TOGGLE);
+        action(&b_buttons[2], "START", "Close this app", "Keeps streaming",
+               b->pressed == BTN_EXIT);
+        text(10, 210, 1, C_MUTED, "In a game: hold START+SELECT");
+        text(10, 222, 1, C_MUTED, "for 2 seconds to stop.");
+        return;
+    }
+
+    /* Logs */
+    text(10, 9, 1, C_TEXT, "Logs");
+    char pos[24];
+    int last = b->scroll + UI_LOG_VISIBLE < b->line_count ? b->scroll + UI_LOG_VISIBLE : b->line_count;
+    snprintf(pos, sizeof(pos), "%d-%d of %d", b->line_count ? b->scroll + 1 : 0, last, b->line_count);
+    text(CONTENT - 8 - text_w(pos, 1), 9, 1, C_MUTED, pos);
+    rect(8, 24, 240, 184, C_CARD);
+    if (!b->line_count)
+        text(16, 32, 1, C_MUTED, "Nothing logged yet.");
+    for (int i = 0; i < UI_LOG_VISIBLE && b->scroll + i < b->line_count; i++) {
+        const char *line = b->lines[b->scroll + i];
+        if (line[0] == '#')
+            text(12, 28 + i * 10, 1, C_HEADER, line + 1);
+        else
+            text(12, 28 + i * 10, 1, C_TEXT, line);
+    }
+    const char up[] = { 0x1E, ' ', 'U', 'p', 0 }, down[] = { 0x1F, ' ', 'D', 'o', 'w', 'n', 0 };
+    rect(b_up.x, b_up.y, b_up.w, b_up.h, b->pressed == BTN_SCROLL_UP ? C_PRESS : C_CARD);
+    rect(b_down.x, b_down.y, b_down.w, b_down.h, b->pressed == BTN_SCROLL_DOWN ? C_PRESS : C_CARD);
+    text(b_up.x + (b_up.w - text_w(up, 1)) / 2, b_up.y + 8, 1, C_TEXT, up);
+    text(b_down.x + (b_down.w - text_w(down, 1)) / 2, b_down.y + 8, 1, C_TEXT, down);
+}
