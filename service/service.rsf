@@ -18,7 +18,9 @@ Option:
   FreeProductCode         : true
   MediaFootPadding        : false
   EnableCrypt             : false
-  EnableCompress          : true
+  # Must stay false: with compressed code, Luma's loader panics opening the
+  # service's .code from NAND (FS 0xE0C046F8). HzMod/ChirunoMod ship uncompressed too.
+  EnableCompress          : false
 
 AccessControlInfo:
   CoreVersion             : 2
@@ -141,7 +143,7 @@ AccessControlInfo:
 
 SystemControlInfo:
   SaveDataSize            : 0KB
-  RemasterVersion         : 0
+  RemasterVersion         : 2       # same as the proven HzMod/ChirunoMod modules
   StackSize               : 0x2000
   Dependency:
     gsp: 0x0004013000001c02

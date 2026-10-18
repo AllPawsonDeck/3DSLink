@@ -42,6 +42,7 @@ def parse(path):
         "priority": priority,
         "services": [s for s in services if s],
         "flags": hex(flags),
+        "compressed": bool(ex[0xD] & 1),
     }
 
 
@@ -49,12 +50,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cia")
     ap.add_argument("--expect-tid")
+    ap.add_argument("--expect-uncompressed", action="store_true",
+                    help="fail if .code is compressed (Luma's loader can't load such system modules)")
     args = ap.parse_args()
     info = parse(args.cia)
     for k, v in info.items():
         print(f"{k:10} {v}")
     if args.expect_tid and info["title_id"] != args.expect_tid.upper():
         sys.exit(f"unexpected title ID {info['title_id']}, wanted {args.expect_tid}")
+    if args.expect_uncompressed and info["compressed"]:
+        sys.exit(".code is compressed; set EnableCompress: false in the RSF")
 
 
 if __name__ == "__main__":

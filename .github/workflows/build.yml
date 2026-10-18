@@ -39,7 +39,7 @@ jobs:
       - name: Check title IDs
         run: |
           python3 tools/cia_info.py build/app/3DSLink.cia --expect-tid 000400000CFAAF00
-          python3 tools/cia_info.py build/service/3DSLinkService.cia --expect-tid 000401300CF10902
+          python3 tools/cia_info.py build/service/3DSLinkService.cia --expect-tid 000401300CF10902 --expect-uncompressed
 
       - uses: actions/upload-artifact@v4
         with:
