@@ -6,8 +6,11 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
-## Unreleased
+## 0.2.5 (2026-10-18)
 
+- **Fixed:** with 0.2.4, highlighting 3DSLink on the HOME Menu showed no
+  banner and froze the 3DS. The 3D banner is removed and the flat banner is
+  back.
 - Every release now starts with a changelog, so you can see what changed.
 
 ## 0.2.4 (2026-10-18)

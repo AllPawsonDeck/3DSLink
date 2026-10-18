@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build the 3D HOME Menu banner (app/assets/banner.cgfx).
+"""EXPERIMENTAL: build a 3D HOME Menu banner (build/banner3d/banner.cgfx).
+
+Not used by the build. The banner this made for 0.2.4 showed nothing and froze
+the HOME Menu on real hardware, so treat its output as untested.
 
 The scene is a small pop-up diorama seen through the HOME Menu banner camera:
 a backdrop, an open 3DS whose top screen leans back, Wi-Fi waves that pulse
@@ -31,7 +34,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "build" / "banner3d"
-OUT = ROOT / "app" / "assets" / "banner.cgfx"
+OUT = WORK / "banner.cgfx"
 
 # HOME Menu banner camera (from pycgfx's banner-camera.gltf).
 CAM = np.array([0.0, 1.0, 44.786])
