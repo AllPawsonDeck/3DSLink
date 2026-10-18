@@ -610,36 +610,68 @@ static void client_flush(client_t *c, uint64_t now)
 
 /* ---- networking --------------------------------------------------------- */
 
+/*
+ * Open the listening socket the way HzMod/ChirunoMod do on real hardware:
+ * only once Wi-Fi has an address, bound to that address, and without
+ * SO_REUSEADDR. Binding to INADDR_ANY is only tried as a fallback.
+ */
 static void open_listener(uint64_t now)
 {
+    static unsigned failures;
+    static bool told_wifi;
     if (listen_fd >= 0) {
         close(listen_fd);
         listen_fd = -1;
     }
     listen_addr = plat_net_address();
-
-    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (fd < 0) {
-        core_log("socket() failed: %d", errno);
-        listen_retry_at = now + 1000;
+    listen_retry_at = now + 1000;
+    if (!listen_addr) {
+        if (!told_wifi)
+            core_log("waiting for Wi-Fi");
+        told_wifi = true;
         return;
     }
-    int one = 1;
+    told_wifi = false;
+
+    /* Log the first few failures, then only now and then, so the log on the
+     * SD card doesn't fill up while we retry every second. */
+    bool loud = failures < 3 || failures % 30 == 0;
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (fd < 0) {
+        if (loud)
+            core_log("socket() failed (errno %d)", errno);
+        failures++;
+        return;
+    }
+#ifdef TDSL_HOST
+    int one = 1; /* lets the PC test harness restart instantly */
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+#endif
 
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)cfg.port);
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 || listen(fd, 4) < 0) {
-        core_log("port %d busy (errno %d), retrying", cfg.port, errno);
+    sa.sin_addr.s_addr = failures % 2 == 0 ? listen_addr : htonl(INADDR_ANY);
+    const char *step = "bind";
+    int rc = bind(fd, (struct sockaddr *)&sa, sizeof(sa));
+    if (rc == 0) {
+        step = "listen";
+        rc = listen(fd, 4);
+    }
+    if (rc < 0) {
+        if (loud) {
+            struct in_addr a = sa.sin_addr;
+            core_log("%s on %s:%d failed (errno %d), retrying", step,
+                     a.s_addr ? inet_ntoa(a) : "any address", cfg.port, errno);
+        }
         close(fd);
-        listen_retry_at = now + 1000;
+        failures++;
         return;
     }
     set_nonblocking(fd);
     listen_fd = fd;
+    failures = 0;
 
     struct in_addr a;
     a.s_addr = listen_addr;

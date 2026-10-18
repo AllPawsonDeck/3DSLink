@@ -6,6 +6,19 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.6 (2026-10-18)
+
+- **Fixed (hopefully):** the streaming service could never open its port and
+  kept logging "port 8080 busy (errno 9)". Error 9 actually means the 3DS
+  rejected the socket, not that the port was taken. The service now opens the
+  port the way the proven HzMod/ChirunoMod modules do: it waits for Wi-Fi,
+  binds to the 3DS's own address, and skips an option the 3DS may not like.
+  The log now says exactly which step failed.
+- **Fixed (hopefully):** "BIBIBI" beeps when 3DSLink is highlighted on the
+  HOME Menu. The banner sound was always silent, but every build that beeped
+  stored it as 22 kHz mono. It is now 44.1 kHz stereo, the format known to
+  work.
+
 ## 0.2.5 (2026-10-18)
 
 - **Fixed:** with 0.2.4, highlighting 3DSLink on the HOME Menu showed no

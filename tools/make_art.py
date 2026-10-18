@@ -138,13 +138,14 @@ def make_banner():
 
 
 def make_silent_wav(path):
-    # HOME Menu loops banner audio; a jingle quickly becomes annoying.
-    rate = 22050
+    # Silent on purpose. It must be 16-bit *stereo* 44.1 kHz: every build
+    # whose banner sound was 22 kHz mono made the HOME Menu go "BIBIBI".
+    rate = 44100
     with wave.open(str(path), "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(rate)
-        w.writeframes(struct.pack("<h", 0) * (rate // 2))
+        w.writeframes(struct.pack("<hh", 0, 0) * (rate * 3 // 2))
 
 
 def main():
