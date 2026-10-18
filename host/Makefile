@@ -4,9 +4,9 @@ BUILD   := $(ROOT)/build/host
 VERSION := $(shell cat $(ROOT)/VERSION)
 
 CFLAGS  ?= -O2 -g
-CFLAGS  += -std=c11 -Wall -Wextra -Wno-unused-parameter -DTDSL_HOST -DTDSL_VERSION=\"$(VERSION)\" \
+CFLAGS  += -pthread -std=c11 -Wall -Wextra -Wno-unused-parameter -DTDSL_HOST -DTDSL_VERSION=\"$(VERSION)\" \
            -D_DEFAULT_SOURCE -I$(ROOT)/service/source
-LDLIBS  := -ljpeg
+LDLIBS  := -ljpeg -pthread
 
 SRCS := host_platform.c $(wildcard $(ROOT)/service/source/core/*.c) $(BUILD)/web_index.c
 

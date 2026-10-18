@@ -143,7 +143,7 @@ a { color: var(--accent); }
       <input type="range" id="fpsBottom" min="1" max="60">
       <p class="hint">Only screens shown in the current layout are sent, so “Top” gives the top screen the whole 3DS.</p>
     </div>
-    <label class="check"><input type="checkbox" id="half"> Faster, less detail (about twice the frame rate)</label>
+    <label class="check"><input type="checkbox" id="fast"> Faster, less detail (about twice the frame rate)</label>
     <label class="check"><input type="checkbox" id="sharp"> Sharp colour (better small text, more data)</label>
     <label class="check" id="boostRow" hidden><input type="checkbox" id="boost"> New 3DS speed boost (804 MHz)</label>
 
@@ -206,36 +206,39 @@ for (const name of ["top", "bottom"]) {
   const ctx = canvas.getContext("2d", { alpha: false });
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  screens[name] = { name, canvas, ctx, busy: false, pending: null, frames: 0, bytes: 0, fps: 0, kbps: 0, got: false };
+  screens[name] = { name, canvas, ctx, busy: false, pending: new Map(), lastFrame: null,
+                    frames: 0, bytes: 0, fps: 0, kbps: 0, got: false };
 }
 
-function draw(s, bmp) {
-  const ctx = s.ctx;
-  if (bmp.width === s.canvas.height) {
-    // Frames arrive in the 3DS's native sideways orientation; turn them
-    // upright (and stretch them back out in half-detail mode).
-    ctx.setTransform(0, -1, 1, 0, 0, s.canvas.height);
-    ctx.drawImage(bmp, 0, 0, s.canvas.height, s.canvas.width);
+/* A picture covers framebuffer lines [first, first + count) of its screen
+ * (the 3DS sends each screen as a few tiles). Lines run along the screen's
+ * width: frames arrive in the 3DS's native sideways orientation. */
+function draw(s, bmp, first, count) {
+  const ctx = s.ctx, W = s.canvas.width, H = s.canvas.height;
+  if (bmp.width === H) {
+    // Turn it upright, and stretch it back out in fast mode (half the lines).
+    ctx.setTransform(0, -1, 1, 0, 0, H);
+    ctx.drawImage(bmp, 0, first, H, count);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   } else {
-    ctx.drawImage(bmp, 0, 0, s.canvas.width, s.canvas.height);
+    ctx.drawImage(bmp, 0, 0, W, H);
   }
 }
 
-async function decode(s, jpeg) {
+async function decode(s, part) {
   s.busy = true;
   try {
-    const bmp = await createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }));
-    draw(s, bmp);
+    const bmp = await createImageBitmap(new Blob([part.body], { type: "image/jpeg" }));
+    draw(s, bmp, part.first, part.count);
     bmp.close();
-    s.frames++;
+    if (part.frame !== s.lastFrame) { s.lastFrame = part.frame; s.frames++; }
     if (!s.got) { s.got = true; updateNotice(); }
-  } catch (e) { /* a damaged frame: skip it */ }
+  } catch (e) { /* a damaged picture: skip it */ }
   s.busy = false;
-  if (s.pending) {
-    const next = s.pending;
-    s.pending = null;
-    decode(s, next);
+  const next = s.pending.values().next();
+  if (!next.done) {
+    s.pending.delete(next.value.first);
+    decode(s, next.value);
   }
 }
 
@@ -243,9 +246,15 @@ function onPart(headers, body) {
   const s = screens[headers["x-screen"]];
   if (!s || !(headers["content-type"] || "").startsWith("image/")) return; // keep-alive parts
   s.bytes += body.length;
-  // Never queue more than one frame: if decoding falls behind, show the newest.
-  if (s.busy) s.pending = body;
-  else decode(s, body);
+  const lines = (headers["x-lines"] || "").split(" ").map(Number);
+  const part = {
+    body, frame: headers["x-frame"],
+    first: lines.length === 2 ? lines[0] : 0,
+    count: lines.length === 2 ? lines[1] : s.canvas.width,
+  };
+  // If decoding falls behind, keep only the newest picture of each tile.
+  if (s.busy) s.pending.set(part.first, part);
+  else decode(s, part);
 }
 
 /* ---------- multipart/x-mixed-replace parser ---------- */
@@ -458,10 +467,11 @@ function updateStats() {
     if (!(s.name in LAYOUTS[prefs.layout].items)) continue;
     let line = `${s.name.padEnd(6)} ${s.fps.toFixed(1).padStart(4)} fps  ${(s.kbps / 1000).toFixed(2)} Mbit/s`;
     const r = remote && remote.screens && remote.screens[s.name];
-    if (r) line += `  ${r.encode_ms} ms/frame (copy ${r.copy_ms})  q${r.quality}  ${r.format}${r.static ? "  (still)" : ""}`;
+    if (r) line += `  ${r.encode_ms} ms/tile (copy ${r.copy_ms})  q${r.quality}  ${r.format}${r.static ? "  (still)" : ""}`;
     lines.push(line);
   }
-  if (remote && remote.busy !== undefined) lines.push(`3DS busy ${remote.busy}%`);
+  if (remote && remote.busy !== undefined)
+    lines.push(`3DS busy ${remote.busy}% on ${remote.cores} core${remote.cores === 1 ? "" : "s"}`);
   $("stats").textContent = lines.join("\n");
 }
 
@@ -491,7 +501,7 @@ function showRemoteSettings(st) {
     $(out).textContent = fmt(st[key]);
   }
   $("sharp").checked = !!st.sharp;
-  $("half").checked = !!st.half;
+  $("fast").checked = !!st.fast;
   $("boost").checked = !!st.boost;
   $("boostRow").hidden = !st.boost_supported;
 }
@@ -532,13 +542,13 @@ function pushSettings() {
   pushTimer = setTimeout(async () => {
     const q = new URLSearchParams({
       quality: $("quality").value, fps_top: $("fpsTop").value, fps_bottom: $("fpsBottom").value,
-      sharp: $("sharp").checked ? 1 : 0, boost: $("boost").checked ? 1 : 0, half: $("half").checked ? 1 : 0,
+      sharp: $("sharp").checked ? 1 : 0, boost: $("boost").checked ? 1 : 0, fast: $("fast").checked ? 1 : 0,
     });
     try { await fetch(base + "/api/settings?" + q, { cache: "no-store" }); } catch (e) {}
   }, 250);
 }
 for (const id of ["quality", "fpsTop", "fpsBottom"]) $(id).addEventListener("input", pushSettings);
-for (const id of ["sharp", "boost", "half"]) $(id).addEventListener("change", pushSettings);
+for (const id of ["sharp", "boost", "fast"]) $(id).addEventListener("change", pushSettings);
 
 /* ---------- pop-out window ---------- */
 const channel = "BroadcastChannel" in window ? new BroadcastChannel("3dslink") : null;

@@ -11,7 +11,7 @@ typedef struct {
     int max_slots;          /* encoded-frame buffers (min 3) */
     uint32_t slot_bytes;    /* largest JPEG a buffer can hold */
     uint32_t min_slot_bytes;/* give up below this */
-    uint32_t strip_bytes;   /* framebuffer lines copied per DMA */
+    uint32_t strip_bytes;   /* copy buffer per worker (two halves, one per DMA) */
     uint32_t reserve_bytes; /* heap left free for libjpeg + sockets */
     int max_clients;
     int max_streams;
@@ -21,11 +21,19 @@ typedef struct {
     /* After each frame, pause for this share of the time it took (percent),
      * so a CPU core shared with the HOME Menu and games stays responsive. */
     int rest_pct;
+    int helper_rest_pct; /* the same for the extra workers */
+    /* Threads that capture and encode. The first is the one that calls
+     * server_run(); the others run on other cores via plat_thread_start(). */
+    int workers;
+    /* Each screen is sent as this many pictures ("tiles"), so the workers
+     * can share a screen and unchanged parts aren't sent again. */
+    int tiles;
 
     /* Defaults used until the viewer changes them. */
     int quality;
     int fps_top;
     int fps_bottom;
+    bool fast;              /* "Faster, less detail" on by default */
 } server_config;
 
 int  server_start(const server_config *cfg);

@@ -21,7 +21,11 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
 // Connection errors are expected while the test restarts the server.
-page.on("console", (m) => { if (m.type() === "error" && !/ERR_CONNECTION_REFUSED|ERR_EMPTY_RESPONSE/.test(m.text())) errors.push(m.text()); });
+page.on("console", (m) => {
+  if (m.type() !== "error" || /ERR_CONNECTION_REFUSED|ERR_EMPTY_RESPONSE/.test(m.text())) return;
+  console.log("browser error:", m.text());
+  errors.push(m.text());
+});
 
 try {
   await page.goto(`http://127.0.0.1:${port}/`);
@@ -98,15 +102,15 @@ try {
   // Half detail: frames carry half the lines but must still fill the screen
   // the right way up.
   await page.keyboard.press("1");
-  await page.evaluate(() => fetch("/api/settings?half=1"));
+  await page.evaluate(() => fetch("/api/settings?fast=1"));
   await sleep(1500);
   const halfSt = await getStatus();
   const halfGot = await sample();
   for (const s of ["top", "bottom"])
     halfGot[s].forEach((c, i) => { if (!near(c, expect[s][i])) fail(`half detail ${s} corner ${i}: got ${c}, want ${expect[s][i]}`); });
-  console.log("half detail corners ok; frame bytes", halfSt.screens.top.frame_bytes, "half", halfSt.settings.half);
-  if (!halfSt.settings.half) fail("half detail setting not applied");
-  await page.evaluate(() => fetch("/api/settings?half=0"));
+  console.log("half detail corners ok; frame bytes", halfSt.screens.top.frame_bytes, "half", halfSt.settings.fast);
+  if (!halfSt.settings.fast) fail("fast setting not applied");
+  await page.evaluate(() => fetch("/api/settings?fast=0"));
   await page.keyboard.press("3");
   await sleep(500);
 

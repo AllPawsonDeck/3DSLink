@@ -1,11 +1,17 @@
 /*
  * 3DSLink HTTP server + capture scheduler.
  *
- * Single-threaded and non-blocking: one loop accepts connections, serves the
- * viewer page and JSON API, and pushes MJPEG frames to stream clients. When a
- * screen is due, the loop captures it strip by strip and encodes it, pumping
- * the sockets between strips so slow Wi-Fi never stalls encoding (and vice
- * versa). A client that falls behind simply skips frames.
+ * One non-blocking loop accepts connections, serves the viewer page and JSON
+ * API, and pushes MJPEG pictures to stream clients. Each screen is cut into
+ * a few tiles (bands of framebuffer lines) that are captured strip by strip
+ * and encoded as separate JPEGs, so several worker threads (on different CPU
+ * cores) can share the work and a tile that didn't change isn't sent again.
+ * The first worker is the network loop's own thread: it pumps the sockets
+ * between strips, so slow Wi-Fi never stalls encoding (and vice versa). A
+ * client that falls behind simply skips pictures.
+ *
+ * Everything the workers share is guarded by plat_lock(); encoding itself
+ * runs unlocked, into a buffer only that worker uses.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +47,9 @@ extern const unsigned int web_index_gz_len;
 #define STATIC_POLL_MS      100  /* how often an unchanged screen is re-checked */
 #define STATIC_AFTER         15  /* unchanged captures before slowing down */
 #define PUMP_EVERY_MS         5  /* network service interval while encoding */
+#define STUCK_MS            150  /* a tile held this long may be taken over */
+#define MAX_TILES             4
+#define MAX_WORKERS           2
 
 static const char *const screen_names[SCREEN_COUNT] = { "top", "bottom" };
 
@@ -62,6 +71,7 @@ void core_log(const char *fmt, ...)
     if (n > (int)sizeof(line) - 2)
         n = (int)sizeof(line) - 2;
     line[n++] = '\n';
+    plat_lock();
     for (int i = 0; i < n; i++) {
         log_ring[log_head++] = line[i];
         if (log_head == LOG_SIZE) {
@@ -70,6 +80,7 @@ void core_log(const char *fmt, ...)
         }
     }
     plat_log_write(line, n);
+    plat_unlock();
 }
 
 int core_log_read(char *buf, int cap)
@@ -90,7 +101,7 @@ typedef struct {
     int fps[SCREEN_COUNT];
     bool sharp;
     bool boost;
-    bool half;  /* encode every pair of lines as one: about twice as fast */
+    bool fast;  /* encode every pair of lines as one: about twice as fast */
 } settings_t;
 
 static settings_t settings;
@@ -114,8 +125,8 @@ static void settings_set(const char *key, const char *val)
         settings.sharp = v != 0;
     else if (!strcmp(key, "boost"))
         settings.boost = v != 0;
-    else if (!strcmp(key, "half"))
-        settings.half = v != 0;
+    else if (!strcmp(key, "fast"))
+        settings.fast = v != 0;
 }
 
 static void settings_load(void)
@@ -138,82 +149,112 @@ static void settings_save(void)
 {
     char buf[160];
     int n = snprintf(buf, sizeof(buf),
-                     "quality=%d\nfps_top=%d\nfps_bottom=%d\nsharp=%d\nboost=%d\nhalf=%d\n",
+                     "quality=%d\nfps_top=%d\nfps_bottom=%d\nsharp=%d\nboost=%d\nfast=%d\n",
                      settings.quality, settings.fps[SCREEN_TOP],
-                     settings.fps[SCREEN_BOTTOM], settings.sharp, settings.boost, settings.half);
+                     settings.fps[SCREEN_BOTTOM], settings.sharp, settings.boost, settings.fast);
     plat_save_settings(buf, n);
 }
 
-/* ---- frame pool --------------------------------------------------------- */
+/* ---- picture pool ------------------------------------------------------- */
 
 typedef struct {
     uint8_t *data;
     uint32_t len;
-    uint32_t seq;
-    int screen; /* -1 when empty */
-    int refs;   /* clients currently sending this frame */
+    uint32_t seq;     /* unique per picture */
+    int screen;       /* -1 when empty */
+    int tile;
+    uint32_t frame;   /* the screen's capture pass it came from */
+    int first, count; /* framebuffer lines it covers */
+    int refs;         /* clients currently sending it */
+    bool latest;      /* newest picture of its tile */
+    bool encoding;    /* a worker is filling it */
 } slot_t;
 
 static slot_t *slots;
 static int nslots;
 static uint32_t slot_bytes;
-static int latest[SCREEN_COUNT] = { -1, -1 };
+static uint32_t publish_seq;
 
-static bool slot_is_latest(int i)
-{
-    return latest[SCREEN_TOP] == i || latest[SCREEN_BOTTOM] == i;
-}
-
-/* A buffer we can encode into without disturbing anyone. */
+/* A buffer a worker can encode into without disturbing anyone. */
 static int pool_find_scratch(unsigned wanted)
 {
     for (int i = 0; i < nslots; i++)
-        if (slots[i].refs == 0 && !slot_is_latest(i))
+        if (!slots[i].encoding && slots[i].refs == 0 && !slots[i].latest)
             return i;
-    /* Fall back to the cached frame of a screen nobody is watching. */
-    for (int s = 0; s < SCREEN_COUNT; s++) {
-        int i = latest[s];
-        if (i >= 0 && !(wanted & (1u << s)) && slots[i].refs == 0)
+    /* Fall back to a cached picture of a screen nobody is watching. */
+    for (int i = 0; i < nslots; i++)
+        if (!slots[i].encoding && slots[i].refs == 0 && slots[i].screen >= 0 &&
+            !(wanted & (1u << slots[i].screen)))
             return i;
-    }
     return -1;
 }
 
-static void pool_take(int i)
+static void pool_take(int i);
+static void pool_release(int i)
 {
-    for (int s = 0; s < SCREEN_COUNT; s++)
-        if (latest[s] == i)
-            latest[s] = -1;
-    slots[i].screen = -1;
-    slots[i].len = 0;
+    slots[i].encoding = false;
 }
 
-/* ---- screens ------------------------------------------------------------ */
+/* ---- screens and tiles --------------------------------------------------- */
 
 typedef struct {
-    uint32_t seq;
+    int latest;           /* slot with its newest picture, -1 if none */
+    uint32_t busy_frame;  /* pass a worker is capturing it for (0: free) */
+    uint64_t busy_since;
+    uint32_t shown_frame; /* pass of the picture in `latest` */
+    uint32_t hash;        /* of the lines in `latest` */
+    bool have_hash;
+    int static_run;       /* captures in a row that found it unchanged */
+    int format;           /* of `latest` */
+    bool fast;
+} tile_t;
+
+typedef struct {
+    tile_t tile[MAX_TILES];
+    int next_tile;        /* next tile of the current pass to hand out */
+    uint32_t frame;       /* capture passes started */
+    uint32_t counted;     /* last pass counted as a new frame */
+    uint32_t frames;      /* passes that changed something */
     uint64_t last_start;
     uint64_t pass;        /* stride-scheduling virtual time */
-    uint32_t hash;
-    bool have_hash;
-    int static_run;
-    int quality_cut;      /* lowered after a frame overflowed its buffer */
+    int quality_cut;      /* lowered after a picture overflowed its buffer */
     int good_run;
     int format;
-    bool half;
 
     /* stats, refreshed once per second */
     uint64_t window_start;
     uint32_t frames_window, bytes_window;
     uint32_t fps10, kbps;
-    uint32_t encode_ms;   /* smoothed: whole capture + encode */
+    uint32_t encode_ms;   /* smoothed, per tile: capture + encode */
     uint32_t copy_ms;     /* smoothed: of that, waiting for framebuffer copies */
-    uint32_t last_size;
+    uint32_t last_size;   /* bytes of the last picture */
     char error[64];
     bool ok_logged;       /* "sending pictures" logged since the last error */
 } screen_t;
 
 static screen_t screens[SCREEN_COUNT];
+static int ntiles = 1;
+
+/* Lines [first, first + count) of tile t. Boundaries fall on multiples of 16
+ * (whole JPEG blocks), so the seams don't show. */
+static void tile_range(int lines, int t, int *first, int *count)
+{
+    int a = (lines * t / ntiles) & ~15;
+    int b = t + 1 == ntiles ? lines : (lines * (t + 1) / ntiles) & ~15;
+    *first = a;
+    *count = b - a;
+}
+
+static void pool_take(int i)
+{
+    slot_t *f = &slots[i];
+    if (f->latest)
+        screens[f->screen].tile[f->tile].latest = -1;
+    f->latest = false;
+    f->screen = -1;
+    f->len = 0;
+    f->encoding = true;
+}
 
 /* ---- clients ------------------------------------------------------------ */
 
@@ -232,8 +273,8 @@ typedef struct {
     int body_slot;   /* frame slot this client holds a reference on */
 
     unsigned want;   /* SCREEN mask (streams) */
-    uint32_t sent_seq[SCREEN_COUNT];
-    int rr;
+    uint32_t sent_seq[SCREEN_COUNT][MAX_TILES];
+    int rr;          /* tile to look at first next time (round robin) */
     bool first_part;
 } client_t;
 
@@ -241,9 +282,6 @@ static client_t *clients;
 static int max_clients, max_streams;
 
 static server_config cfg;
-static jpeg_enc *enc;
-static uint8_t *strip;
-static uint32_t strip_bytes;
 static int listen_fd = -1;
 static uint32_t listen_addr;
 static uint64_t listen_retry_at;
@@ -251,10 +289,34 @@ static uint64_t started_at;
 
 static uint64_t total_frames;
 static uint64_t last_pump;
-static uint32_t busy_ms_window;  /* time spent capturing + encoding this second */
 static uint64_t busy_window_start;
 static uint32_t busy_pct;
-static uint32_t half_bytes;     /* each half of the strip buffer */
+
+/* ---- workers ------------------------------------------------------------ */
+
+typedef struct {
+    int index;
+    jpeg_enc *enc;
+    uint8_t *strip_mem;
+    uint8_t *strip;       /* two halves: one is copied into while the other is encoded */
+    uint32_t half_bytes;
+    capture_ctx *cap;
+    uint32_t busy_ms;     /* capturing + encoding, this second */
+    void *thread;
+} worker_t;
+
+static worker_t workers[MAX_WORKERS];
+static int nworkers;          /* set up */
+static int running_workers;   /* actually running (a thread may fail to start) */
+static bool stopping;         /* guarded by the lock, like everything shared */
+
+static bool is_stopping(void)
+{
+    plat_lock();
+    bool s = stopping;
+    plat_unlock();
+    return s;
+}
 
 static void set_nonblocking(int fd)
 {
@@ -348,16 +410,25 @@ static int settings_json(char *b, int cap)
 {
     return snprintf(b, (size_t)cap,
                     "{\"quality\":%d,\"fps_top\":%d,\"fps_bottom\":%d,"
-                    "\"sharp\":%s,\"boost\":%s,\"boost_supported\":%s,\"half\":%s}",
+                    "\"sharp\":%s,\"boost\":%s,\"boost_supported\":%s,\"fast\":%s}",
                     settings.quality, settings.fps[SCREEN_TOP], settings.fps[SCREEN_BOTTOM],
                     settings.sharp ? "true" : "false", settings.boost ? "true" : "false",
-                    boost_supported ? "true" : "false", settings.half ? "true" : "false");
+                    boost_supported ? "true" : "false", settings.fast ? "true" : "false");
 }
 
 static const char *format_name(int f)
 {
     static const char *const names[] = { "RGBA8", "BGR8", "RGB565", "RGB5A1", "RGBA4" };
     return f >= 0 && f <= 4 ? names[f] : "none";
+}
+
+/* Unchanged for a while: re-checked less often. */
+static bool screen_static(const screen_t *st)
+{
+    for (int t = 0; t < ntiles; t++)
+        if (st->tile[t].static_run < STATIC_AFTER)
+            return false;
+    return true;
 }
 
 static int status_json(char *b, int cap)
@@ -387,16 +458,17 @@ static int status_json(char *b, int cap)
                       "%s\"%s\":{\"frames\":%u,\"fps\":%u.%u,\"kbps\":%u,\"frame_bytes\":%u,"
                       "\"encode_ms\":%u,\"copy_ms\":%u,\"format\":\"%s\",\"static\":%s,"
                       "\"quality\":%d,\"error\":\"%s\"}",
-                      s ? "," : "", screen_names[s], (unsigned)st->seq, (unsigned)(st->fps10 / 10),
+                      s ? "," : "", screen_names[s], (unsigned)st->frames, (unsigned)(st->fps10 / 10),
                       (unsigned)(st->fps10 % 10), (unsigned)st->kbps, (unsigned)st->last_size,
                       (unsigned)st->encode_ms, (unsigned)st->copy_ms, format_name(st->format),
-                      st->static_run >= STATIC_AFTER ? "true" : "false",
+                      screen_static(st) ? "true" : "false",
                       clampi(settings.quality - st->quality_cut, 10, 95), err);
     }
-    n += snprintf(b + n, (size_t)(cap - n), "},\"busy\":%u", (unsigned)busy_pct);
+    n += snprintf(b + n, (size_t)(cap - n), "},\"busy\":%u,\"cores\":%d", (unsigned)busy_pct,
+                  running_workers);
     n += snprintf(b + n, (size_t)(cap - n),
                   ",\"memory\":{\"slots\":%d,\"slot_kb\":%u,\"strip_kb\":%u}}",
-                  nslots, (unsigned)(slot_bytes / 1024), (unsigned)(strip_bytes / 1024));
+                  nslots, (unsigned)(slot_bytes / 1024), (unsigned)(cfg.strip_bytes / 1024));
     return n < cap ? n : cap - 1;
 }
 
@@ -445,8 +517,8 @@ static void start_stream(client_t *c, const char *query)
 
     c->state = C_STREAM;
     c->want = want;
-    c->sent_seq[0] = c->sent_seq[1] = 0;
-    c->rr = SCREEN_TOP;
+    memset(c->sent_seq, 0, sizeof(c->sent_seq));
+    c->rr = 0;
     c->first_part = true;
     c->hdr_len = snprintf(c->hdr, sizeof(c->hdr),
                           "HTTP/1.1 200 OK\r\n"
@@ -499,7 +571,7 @@ static void handle_request(client_t *c)
         int n = status_json(c->buf, sizeof(c->buf));
         respond(c, 200, "application/json", NULL, c->buf, (uint32_t)n);
     } else if (!strcmp(target, "/api/settings")) {
-        static const char *const keys[] = { "quality", "fps_top", "fps_bottom", "sharp", "boost", "half" };
+        static const char *const keys[] = { "quality", "fps_top", "fps_bottom", "sharp", "boost", "fast" };
         bool changed = false;
         char v[16];
         for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -530,13 +602,17 @@ static void handle_request(client_t *c)
 
 /* ---- streaming ---------------------------------------------------------- */
 
-/* Queue the newest unsent frame for a stream client. */
+/* Queue the newest unsent picture for a stream client, taking the screens'
+ * tiles in turn. */
 static bool queue_frame(client_t *c)
 {
-    for (int k = 0; k < SCREEN_COUNT; k++) {
-        int s = (c->rr + k) % SCREEN_COUNT;
-        int i = latest[s];
-        if (!(c->want & (1u << s)) || i < 0 || slots[i].seq == c->sent_seq[s])
+    const int n = SCREEN_COUNT * MAX_TILES;
+    for (int k = 0; k < n; k++) {
+        int idx = (c->rr + k) % n, s = idx / MAX_TILES, t = idx % MAX_TILES;
+        if (t >= ntiles || !(c->want & (1u << s)))
+            continue;
+        int i = screens[s].tile[t].latest;
+        if (i < 0 || slots[i].seq == c->sent_seq[s][t])
             continue;
         slot_t *f = &slots[i];
         c->hdr_len = snprintf(c->hdr, sizeof(c->hdr),
@@ -544,17 +620,18 @@ static bool queue_frame(client_t *c)
                               "Content-Type: image/jpeg\r\n"
                               "Content-Length: %u\r\n"
                               "X-Screen: %s\r\n"
-                              "X-Frame: %u\r\n\r\n",
+                              "X-Frame: %u\r\n"
+                              "X-Lines: %d %d\r\n\r\n",
                               c->first_part ? "" : "\r\n", (unsigned)f->len,
-                              screen_names[s], (unsigned)f->seq);
+                              screen_names[s], (unsigned)f->frame, f->first, f->count);
         c->hdr_off = 0;
         c->body = f->data;
         c->body_len = f->len;
         c->body_off = 0;
         c->body_slot = i;
         f->refs++;
-        c->sent_seq[s] = f->seq;
-        c->rr = (s + 1) % SCREEN_COUNT;
+        c->sent_seq[s][t] = f->seq;
+        c->rr = (idx + 1) % n;
         c->first_part = false;
         return true;
     }
@@ -813,7 +890,9 @@ static void client_read(client_t *c, uint64_t now)
     }
 }
 
-/* One round of network I/O, waiting up to timeout_ms for activity. */
+/* One round of network I/O, waiting up to timeout_ms for activity. Only the
+ * first worker (the server_run() thread) calls this; the lock is let go
+ * while it waits. */
 static void net_pump(int timeout_ms)
 {
     struct pollfd pfd[1 + 16];
@@ -822,6 +901,7 @@ static void net_pump(int timeout_ms)
     uint64_t now = plat_now_ms();
     last_pump = now;
 
+    plat_lock();
     if (listen_fd < 0 && now >= listen_retry_at)
         open_listener(now);
 
@@ -841,14 +921,21 @@ static void net_pump(int timeout_ms)
         map[n++] = i;
     }
 
+    plat_unlock();
+
+    int rc = 0;
     if (n == 0) {
         /* Nothing to wait on (no network yet): just sleep a little. */
         plat_sleep_ms(timeout_ms);
-    } else if (poll(pfd, (nfds_t)n, timeout_ms) < 0) {
-        if (errno != EINTR)
-            core_log("poll failed (errno %d)", errno);
+    } else {
+        rc = poll(pfd, (nfds_t)n, timeout_ms);
     }
+    int poll_errno = errno;
     now = plat_now_ms();
+
+    plat_lock();
+    if (rc < 0 && poll_errno != EINTR)
+        core_log("poll failed (errno %d)", poll_errno);
 
     for (int k = 0; k < n; k++) {
         short re = pfd[k].revents;
@@ -895,6 +982,7 @@ static void net_pump(int timeout_ms)
         core_log("network address changed");
         open_listener(now);
     }
+    plat_unlock();
 }
 
 /* ---- capture + encode --------------------------------------------------- */
@@ -917,6 +1005,7 @@ static bool geom_ok(const frame_geom *g)
            (g->stride & 3) == 0;
 }
 
+/* Call with the lock held. */
 static void screen_error(screen_t *st, const char *msg)
 {
     st->ok_logged = false;
@@ -926,69 +1015,79 @@ static void screen_error(screen_t *st, const char *msg)
     }
 }
 
+static void locked_screen_error(int s, const char *msg)
+{
+    plat_lock();
+    screen_error(&screens[s], msg);
+    plat_unlock();
+}
+
 /*
- * Reads a framebuffer a strip of lines at a time through the two halves of
- * the strip buffer: while one half is hashed and encoded, the copy of the
- * next lines into the other half is already running.
+ * Reads lines [first, first + count) of a framebuffer a strip at a time
+ * through the two halves of a worker's strip buffer: while one half is hashed
+ * and encoded, the copy of the next lines into the other half is already
+ * running.
  */
 typedef struct {
-    int screen, lines, per_strip;
+    worker_t *w;
+    int end, per_strip;
     int first, count; /* lines being copied right now (count 0: none) */
     int which;        /* half they are going into */
     uint32_t wait_ms; /* time spent waiting for copies */
 } strip_reader;
 
-static uint8_t *strip_half(int which)
+static uint8_t *strip_half(worker_t *w, int which)
 {
-    return strip + (which ? half_bytes : 0);
+    return w->strip + (which ? w->half_bytes : 0);
 }
 
-static int reader_start(strip_reader *r, int s, const frame_geom *g, int per_strip)
+static int reader_start(strip_reader *r, worker_t *w, int first, int count, int per_strip)
 {
-    r->screen = s;
-    r->lines = g->lines;
+    r->w = w;
+    r->end = first + count;
     r->per_strip = per_strip;
-    r->first = 0;
-    r->count = per_strip < g->lines ? per_strip : g->lines;
+    r->first = first;
+    r->count = per_strip < count ? per_strip : count;
     r->which = 0;
     r->wait_ms = 0;
-    return capture_start(s, 0, r->count, strip_half(0));
+    return capture_start(w->cap, first, r->count, strip_half(w, 0));
 }
 
 /* Waits for the next strip and starts copying the one after it. Returns how
- * many lines *out holds: 0 once the frame is done, -1 if a copy failed. */
+ * many lines *out holds: 0 once the range is done, -1 if a copy failed. */
 static int reader_next(strip_reader *r, const uint8_t **out)
 {
     if (r->count == 0)
         return 0;
     uint64_t t = plat_now_ms();
-    int rc = capture_wait(r->screen);
+    int rc = capture_wait(r->w->cap);
     r->wait_ms += (uint32_t)(plat_now_ms() - t);
     if (rc != 0)
         return -1;
 
     int n = r->count, done = r->which, next = r->first + n;
     r->count = 0;
-    if (next < r->lines) {
-        int m = r->lines - next < r->per_strip ? r->lines - next : r->per_strip;
-        if (capture_start(r->screen, next, m, strip_half(!done)) != 0)
+    if (next < r->end) {
+        int m = r->end - next < r->per_strip ? r->end - next : r->per_strip;
+        if (capture_start(r->w->cap, next, m, strip_half(r->w, !done)) != 0)
             return -1;
         r->first = next;
         r->count = m;
         r->which = !done;
     }
-    *out = strip_half(done);
+    *out = strip_half(r->w, done);
     return n;
 }
 
-/* Hash the framebuffer without encoding it (cheap change detection). */
-static int probe_hash(int s, const frame_geom *g, int per_strip, uint32_t *out)
+/* Hash lines without encoding them (cheap change detection). */
+static int probe_hash(worker_t *w, const frame_geom *g, int first, int count, int per_strip,
+                      uint32_t *out)
 {
     uint32_t h = 2166136261u;
     strip_reader r;
     const uint8_t *lines;
     int n;
-    if (reader_start(&r, s, g, per_strip) != 0)
+    if (reader_start(&r, w, first, count, per_strip) != 0)
         return -1;
     while ((n = reader_next(&r, &lines)) > 0)
         h = hash_lines(h, lines, n, g);
@@ -996,145 +1095,215 @@ static int probe_hash(int s, const frame_geom *g, int per_strip, uint32_t *out)
     return n;
 }
 
-static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t t0);
-
-static void produce(int s, unsigned wanted)
+static bool should_stop(worker_t *w)
 {
-    frame_geom g;
-    uint64_t t0 = plat_now_ms();
-    if (capture_begin(s, &g) != 0) {
-        screen_error(&screens[s], "screen is not available right now");
-        return;
-    }
-    produce_frame(s, wanted, &g, t0);
-    capture_end(s);
+    /* Only the server_run() thread may look at the platform's stop signal. */
+    return is_stopping() || (w->index == 0 && plat_should_exit());
 }
 
-static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t t0)
+typedef struct {
+    int screen, tile;
+    uint32_t frame; /* capture pass */
+} job_t;
+
+/* Capture one tile of a screen and, if it changed, encode and publish it. */
+static void encode_tile(worker_t *w, const job_t *j, const frame_geom *gp, uint64_t t0)
 {
+    const int s = j->screen, t = j->tile;
     screen_t *st = &screens[s];
+    tile_t *tl = &st->tile[t];
     frame_geom g = *gp;
     if (!geom_ok(&g)) {
-        screen_error(st, "unsupported framebuffer layout");
+        locked_screen_error(s, "unsupported framebuffer layout");
         return;
     }
-    bool half = settings.half;
-    int per_strip = (int)(half_bytes / (uint32_t)g.stride);
-    if (per_strip > g.lines)
-        per_strip = g.lines;
-    if (half)
-        per_strip &= ~1; /* half detail encodes lines in pairs */
+    int first, count;
+    tile_range(g.lines, t, &first, &count);
+
+    /* What we need to know about the tile, read while holding the lock. */
+    plat_lock();
+    const bool fast = settings.fast, sharp = settings.sharp;
+    const int quality = clampi(settings.quality - st->quality_cut, 10, 95);
+    const bool same_kind = tl->latest >= 0 && tl->have_hash && g.format == tl->format &&
+                           fast == tl->fast;
+    const bool probe = same_kind && tl->static_run > 0;
+    const uint32_t old_hash = tl->hash;
+    plat_unlock();
+
+    int per_strip = (int)(w->half_bytes / (uint32_t)g.stride);
+    if (per_strip > count)
+        per_strip = count;
+    if (fast)
+        per_strip &= ~1; /* fast mode encodes lines in pairs */
     if (per_strip < 1) {
-        screen_error(st, "capture buffer too small");
+        locked_screen_error(s, "capture buffer too small");
         return;
     }
 
-    bool changed_format = g.format != st->format || half != st->half;
-    st->format = g.format;
-    st->half = half;
-    /* Unchanged frames are only skipped while viewers can still be given the
-     * cached copy; once that buffer was recycled we must encode again. */
-    bool cached = latest[s] >= 0;
-
-    /* A screen that sat still last time is first checked cheaply. */
-    if (st->static_run > 0 && st->have_hash && !changed_format && cached) {
+    /* A tile that sat still last time is first checked cheaply. */
+    if (probe) {
         uint32_t h;
-        if (probe_hash(s, &g, per_strip, &h) != 0) {
-            screen_error(st, "framebuffer copy failed");
+        if (probe_hash(w, &g, first, count, per_strip, &h) != 0) {
+            locked_screen_error(s, "framebuffer copy failed");
             return;
         }
-        if (h == st->hash) {
-            st->static_run++;
+        if (h == old_hash) {
+            plat_lock();
+            if (tl->shown_frame < j->frame)
+                tl->static_run++;
+            plat_unlock();
             return;
         }
     }
 
-    int slot = pool_find_scratch(wanted);
+    plat_lock();
+    int slot = pool_find_scratch(wanted_screens());
+    if (slot >= 0)
+        pool_take(slot);
+    plat_unlock();
     if (slot < 0)
-        return;
-    pool_take(slot);
+        return; /* every buffer is busy being sent; try again next time */
 
-    int quality = clampi(settings.quality - st->quality_cut, 10, 95);
-    int rc = jpeg_enc_begin(enc, &g, quality, settings.sharp, half, slots[slot].data, slot_bytes);
+    frame_geom tg = g;
+    tg.lines = count;
+    int rc = jpeg_enc_begin(w->enc, &tg, quality, sharp, fast, slots[slot].data, slot_bytes);
     uint32_t h = 2166136261u;
-    strip_reader r;
-    if (rc == ENC_OK && reader_start(&r, s, &g, per_strip) != 0) {
-        jpeg_enc_abort(enc);
-        screen_error(st, "framebuffer copy failed");
-        return;
-    }
-    while (rc == ENC_OK) {
+    strip_reader r = { 0 };
+    bool copy_failed = rc == ENC_OK && reader_start(&r, w, first, count, per_strip) != 0;
+    while (rc == ENC_OK && !copy_failed) {
         const uint8_t *lines;
         int n = reader_next(&r, &lines);
         if (n == 0)
             break;
         if (n < 0) {
-            jpeg_enc_abort(enc);
-            screen_error(st, "framebuffer copy failed");
-            return;
+            copy_failed = true;
+            break;
         }
         h = hash_lines(h, lines, n, &g);
-        rc = jpeg_enc_lines(enc, lines, n);
+        rc = jpeg_enc_lines(w->enc, lines, n);
         /* Keep viewers fed, but don't ask the network module after every
          * strip: each check is a round trip to another process. */
-        if (plat_now_ms() - last_pump >= PUMP_EVERY_MS)
+        if (w->index == 0 && plat_now_ms() - last_pump >= PUMP_EVERY_MS)
             net_pump(0);
-        if (plat_should_exit()) {
-            jpeg_enc_abort(enc);
+        if (should_stop(w)) {
+            jpeg_enc_abort(w->enc);
+            plat_lock();
+            pool_release(slot);
+            plat_unlock();
             return;
         }
     }
-
     uint32_t len = 0;
-    if (rc == ENC_OK)
-        rc = jpeg_enc_finish(enc, &len);
-    if (rc == ENC_OVERFLOW) {
-        st->quality_cut = clampi(st->quality_cut + 10, 0, 80);
-        st->good_run = 0;
-        core_log("%s frame too big for buffer, lowering quality to %d", screen_names[s],
-                 clampi(settings.quality - st->quality_cut, 10, 95));
-        return;
-    }
-    if (rc != ENC_OK) {
-        screen_error(st, "JPEG encoding failed");
+    if (copy_failed)
+        jpeg_enc_abort(w->enc);
+    else if (rc == ENC_OK)
+        rc = jpeg_enc_finish(w->enc, &len);
+    uint32_t ms = (uint32_t)(plat_now_ms() - t0);
+
+    plat_lock();
+    if (copy_failed || rc != ENC_OK) {
+        pool_release(slot);
+        if (copy_failed) {
+            screen_error(st, "framebuffer copy failed");
+        } else if (rc == ENC_OVERFLOW) {
+            st->quality_cut = clampi(st->quality_cut + 10, 0, 80);
+            st->good_run = 0;
+            core_log("%s picture too big for its buffer, lowering quality to %d", screen_names[s],
+                     clampi(settings.quality - st->quality_cut, 10, 95));
+        } else {
+            screen_error(st, "JPEG encoding failed");
+        }
+        plat_unlock();
         return;
     }
     st->error[0] = 0;
-
-    uint32_t ms = (uint32_t)(plat_now_ms() - t0);
     st->encode_ms = st->encode_ms ? (st->encode_ms * 3 + ms) / 4 : ms;
     st->copy_ms = (st->copy_ms * 3 + r.wait_ms) / 4;
+    st->format = g.format;
 
-    if (st->have_hash && h == st->hash && !changed_format && cached) {
-        st->static_run++;
-        return; /* identical to what viewers already have */
+    /* Another worker took this tile over and already showed something newer,
+     * or the picture is identical to what viewers already have. */
+    bool stale = tl->shown_frame > j->frame;
+    bool same = same_kind && tl->latest >= 0 && h == tl->hash;
+    if (stale || same) {
+        if (same && !stale)
+            tl->static_run++;
+        pool_release(slot);
+        plat_unlock();
+        return;
     }
-    st->hash = h;
-    st->have_hash = true;
-    st->static_run = 0;
+    tl->hash = h;
+    tl->have_hash = true;
+    tl->static_run = 0;
+    tl->format = g.format;
+    tl->fast = fast;
+    tl->shown_frame = j->frame;
 
     /* Creep back up after an overflow forced the quality down. */
     if (st->quality_cut > 0 && ++st->good_run >= 60) {
         st->quality_cut -= 5;
         st->good_run = 0;
     }
-
     if (!st->ok_logged) {
         st->ok_logged = true;
-        core_log("%s screen: sending pictures (%s, %u KB each)", screen_names[s],
+        core_log("%s screen: sending pictures (%s, %u KB per tile)", screen_names[s],
                  format_name(g.format), (unsigned)((len + 1023) / 1024));
     }
 
-    slots[slot].len = len;
-    slots[slot].seq = ++st->seq;
-    slots[slot].screen = s;
-    latest[s] = slot;
+    if (tl->latest >= 0)
+        slots[tl->latest].latest = false;
+    slot_t *f = &slots[slot];
+    f->len = len;
+    f->seq = ++publish_seq;
+    f->screen = s;
+    f->tile = t;
+    f->frame = j->frame;
+    f->first = first;
+    f->count = count;
+    f->latest = true;
+    f->encoding = false;
+    tl->latest = slot;
     st->last_size = len;
-    st->frames_window++;
-    total_frames++;
+    if (st->counted != j->frame) {
+        st->counted = j->frame;
+        st->frames++;
+        st->frames_window++;
+        total_frames++;
+    }
+    plat_unlock();
 }
 
-/* Would any viewer of screen s accept a new frame right now? */
+static void run_job(worker_t *w, const job_t *j)
+{
+    uint64_t t0 = plat_now_ms();
+    frame_geom g;
+    if (capture_begin(w->cap, j->screen, &g) != 0) {
+        locked_screen_error(j->screen, "screen is not available right now");
+    } else {
+        encode_tile(w, j, &g, t0);
+        capture_end(w->cap);
+    }
+    plat_lock();
+    tile_t *tl = &screens[j->screen].tile[j->tile];
+    if (tl->busy_frame == j->frame)
+        tl->busy_frame = 0;
+    w->busy_ms += (uint32_t)(plat_now_ms() - t0);
+    plat_unlock();
+}
+
+/* Give the rest of the system a turn (server_config.rest_pct). */
+static void rest_after(const worker_t *w, uint64_t t0)
+{
+    int pct = w->index == 0 ? cfg.rest_pct : cfg.helper_rest_pct;
+    if (pct > 0) {
+        int rest = (int)((plat_now_ms() - t0) * (uint64_t)pct / 100);
+        plat_sleep_ms(rest < 1 ? 1 : rest);
+    }
+}
+
+/* ---- scheduling (call with the lock held) -------------------------------- */
+
+/* Would any viewer of screen s accept a new picture right now? */
 static bool screen_ready(int s)
 {
     for (int i = 0; i < max_clients; i++) {
@@ -1151,16 +1320,23 @@ static bool screen_ready(int s)
 static int interval_ms(int s)
 {
     int iv = 1000 / settings.fps[s];
-    if (screens[s].static_run >= STATIC_AFTER && iv < STATIC_POLL_MS)
+    if (screen_static(&screens[s]) && iv < STATIC_POLL_MS)
         iv = STATIC_POLL_MS;
     return iv;
 }
 
-/* Pick the screen to capture next (stride scheduling, capped by fps). */
-static int pick_screen(uint64_t now, int *wait_ms, unsigned wanted)
+/* Can this worker capture the tile now? A tile another worker has held for
+ * too long (its core is busy with a game) may be taken over by the first
+ * worker, so half a screen never freezes. */
+static bool tile_free(const tile_t *tl, const worker_t *w, uint64_t now)
+{
+    return !tl->busy_frame || (w->index == 0 && now - tl->busy_since > STUCK_MS);
+}
+
+/* Pick the screen to start capturing next (stride scheduling, capped by fps). */
+static int pick_screen(uint64_t now, int *wait_ms, unsigned wanted, const worker_t *w)
 {
     int best = -1;
-    *wait_ms = 50;
     uint64_t max_pass = 0;
     for (int s = 0; s < SCREEN_COUNT; s++)
         if ((wanted & (1u << s)) && screens[s].pass > max_pass)
@@ -1176,12 +1352,12 @@ static int pick_screen(uint64_t now, int *wait_ms, unsigned wanted)
 
         uint64_t due = st->last_start + (uint64_t)interval_ms(s);
         if (now < due) {
-            int w = (int)(due - now);
-            if (w < *wait_ms)
-                *wait_ms = w;
+            int wt = (int)(due - now);
+            if (wt < *wait_ms)
+                *wait_ms = wt;
             continue;
         }
-        if (!screen_ready(s))
+        if (!screen_ready(s) || !tile_free(&st->tile[0], w, now))
             continue;
         if (best < 0 || st->pass < screens[best].pass)
             best = s;
@@ -1189,12 +1365,52 @@ static int pick_screen(uint64_t now, int *wait_ms, unsigned wanted)
     return best;
 }
 
+static bool take_job(worker_t *w, job_t *j, uint64_t now, int *wait_ms)
+{
+    *wait_ms = 50;
+    unsigned wanted = wanted_screens();
+    if (!wanted)
+        return false;
+
+    /* Hand out the rest of the passes already started first. */
+    int s = -1;
+    for (int k = 0; k < SCREEN_COUNT && s < 0; k++) {
+        screen_t *st = &screens[k];
+        if ((wanted & (1u << k)) && st->next_tile < ntiles &&
+            tile_free(&st->tile[st->next_tile], w, now))
+            s = k;
+    }
+    if (s < 0) {
+        s = pick_screen(now, wait_ms, wanted, w);
+        if (s < 0)
+            return false;
+        screen_t *st = &screens[s];
+        st->last_start = now;
+        st->pass += (uint64_t)interval_ms(s);
+        st->frame++;
+        st->next_tile = 0;
+    }
+    screen_t *st = &screens[s];
+    tile_t *tl = &st->tile[st->next_tile];
+    j->screen = s;
+    j->tile = st->next_tile++;
+    j->frame = st->frame;
+    tl->busy_frame = j->frame;
+    tl->busy_since = now;
+    return true;
+}
+
 static void update_stats(uint64_t now)
 {
     if (now - busy_window_start >= 1000) {
-        uint32_t pct = (uint32_t)(busy_ms_window * 100ull / (now - busy_window_start));
+        uint64_t total = 0;
+        for (int i = 0; i < nworkers; i++) {
+            total += workers[i].busy_ms;
+            workers[i].busy_ms = 0;
+        }
+        uint64_t span = (now - busy_window_start) * (uint64_t)(running_workers ? running_workers : 1);
+        uint32_t pct = (uint32_t)(total * 100ull / span);
         busy_pct = pct > 100 ? 100 : pct;
-        busy_ms_window = 0;
         busy_window_start = now;
     }
     for (int s = 0; s < SCREEN_COUNT; s++) {
@@ -1212,59 +1428,93 @@ static void update_stats(uint64_t now)
 
 /* ---- lifecycle ---------------------------------------------------------- */
 
+static void worker_free(worker_t *w)
+{
+    free(w->strip_mem);
+    w->strip_mem = w->strip = NULL;
+    jpeg_enc_destroy(w->enc);
+    w->enc = NULL;
+}
+
+static bool worker_init(worker_t *w, int index)
+{
+    memset(w, 0, sizeof(*w));
+    w->index = index;
+    /* Two halves, each a whole number of cache lines (the DMA writes one
+     * while the CPU reads the other). */
+    uint32_t bytes = cfg.strip_bytes & ~127u;
+    w->half_bytes = bytes / 2;
+    w->strip_mem = malloc(bytes + 64);
+    w->strip = w->strip_mem ? (uint8_t *)(((uintptr_t)w->strip_mem + 63) & ~(uintptr_t)63) : NULL;
+    w->enc = jpeg_enc_create();
+    w->cap = capture_ctx_create();
+    if (!w->strip_mem || !w->enc || !w->cap) {
+        worker_free(w);
+        return false;
+    }
+    return true;
+}
+
+/* Grab as many / as large picture buffers as the heap allows while leaving a
+ * reserve for libjpeg's per-picture allocations, worker stacks and sockets. */
+static bool alloc_slots(int needed)
+{
+    for (slot_bytes = cfg.slot_bytes; slot_bytes >= cfg.min_slot_bytes; slot_bytes -= 2048) {
+        nslots = 0;
+        while (nslots < cfg.max_slots && (slots[nslots].data = malloc(slot_bytes)))
+            nslots++;
+        void *reserve = malloc(cfg.reserve_bytes);
+        bool ok = reserve && nslots >= needed;
+        free(reserve);
+        if (ok)
+            return true;
+        while (nslots > 0)
+            free(slots[--nslots].data);
+    }
+    return false;
+}
+
 int server_start(const server_config *config)
 {
     cfg = *config;
     started_at = plat_now_ms();
     max_clients = cfg.max_clients > 16 ? 16 : cfg.max_clients;
     max_streams = cfg.max_streams;
+    ntiles = cfg.tiles < 1 ? 1 : cfg.tiles > MAX_TILES ? MAX_TILES : cfg.tiles;
 
     settings.quality = cfg.quality;
     settings.fps[SCREEN_TOP] = cfg.fps_top;
     settings.fps[SCREEN_BOTTOM] = cfg.fps_bottom;
     settings.sharp = false;
     settings.boost = true;
+    settings.fast = cfg.fast;
     settings_load();
     boost_supported = plat_set_cpu_boost(settings.boost);
 
     clients = calloc((size_t)max_clients, sizeof(client_t));
-    enc = jpeg_enc_create();
-    /* Two halves, each a whole number of cache lines (the DMA writes them
-     * while the CPU reads the other half). */
-    strip_bytes = cfg.strip_bytes & ~127u;
-    half_bytes = strip_bytes / 2;
-    uint8_t *strip_mem = malloc(strip_bytes + 64);
-    strip = strip_mem ? (uint8_t *)(((uintptr_t)strip_mem + 63) & ~(uintptr_t)63) : NULL;
-    if (!clients || !enc || !strip) {
+    slots = calloc((size_t)(cfg.max_slots > 0 ? cfg.max_slots : 1), sizeof(slot_t));
+    if (!clients || !slots || !worker_init(&workers[0], 0)) {
         core_log("out of memory during startup");
         return -1;
     }
+    nworkers = 1;
     for (int i = 0; i < max_clients; i++) {
         clients[i].fd = -1;
         clients[i].body_slot = -1;
     }
 
-    /* Grab as many / as large frame buffers as the heap allows while leaving
-     * a reserve for libjpeg's per-frame allocations and socket buffers. */
-    slots = calloc((size_t)cfg.max_slots, sizeof(slot_t));
-    if (!slots)
-        return -1;
-    for (slot_bytes = cfg.slot_bytes; slot_bytes >= cfg.min_slot_bytes; slot_bytes -= 4096) {
-        nslots = 0;
-        while (nslots < cfg.max_slots && (slots[nslots].data = malloc(slot_bytes)))
-            nslots++;
-        void *reserve = malloc(cfg.reserve_bytes);
-        if (reserve && nslots >= 3) {
-            free(reserve);
-            break;
+    /* Every tile keeps its newest picture, and each worker needs one to
+     * encode into. If memory is short, settle for one worker. */
+    int want_workers = cfg.workers < 1 ? 1 : cfg.workers > MAX_WORKERS ? MAX_WORKERS : cfg.workers;
+    while (nworkers < want_workers && worker_init(&workers[nworkers], nworkers))
+        nworkers++;
+    while (!alloc_slots(SCREEN_COUNT * ntiles + nworkers)) {
+        if (nworkers == 1) {
+            core_log("not enough memory for picture buffers");
+            return -1;
         }
-        free(reserve);
-        while (nslots > 0)
-            free(slots[--nslots].data);
-    }
-    if (nslots < 3) {
-        core_log("not enough memory for frame buffers");
-        return -1;
+        worker_free(&workers[--nworkers]);
+        core_log("memory is short: using %d worker%s", nworkers, nworkers == 1 ? "" : "s");
     }
     for (int i = 0; i < nslots; i++)
         slots[i].screen = -1;
@@ -1272,54 +1522,100 @@ int server_start(const server_config *config)
     for (int s = 0; s < SCREEN_COUNT; s++) {
         screens[s].format = -1;
         screens[s].window_start = started_at;
+        screens[s].next_tile = ntiles;
+        for (int t = 0; t < MAX_TILES; t++) {
+            screens[s].tile[t].latest = -1;
+            screens[s].tile[t].format = -1;
+        }
     }
     busy_window_start = started_at;
 
-    core_log("3DSLink %s on %s: %d x %u KB frame buffers, %u KB strips", cfg.version,
-             cfg.model, nslots, (unsigned)(slot_bytes / 1024), (unsigned)(strip_bytes / 1024));
+    core_log("3DSLink %s on %s: %d x %u KB picture buffers, %u KB copy buffers, %d tiles per screen",
+             cfg.version, cfg.model, nslots, (unsigned)(slot_bytes / 1024),
+             (unsigned)(cfg.strip_bytes / 1024), ntiles);
     open_listener(started_at);
     return 0;
 }
 
+static void worker_main(void *arg)
+{
+    worker_t *w = arg;
+    while (!is_stopping()) {
+        job_t j;
+        int wait;
+        uint64_t now = plat_now_ms();
+        plat_lock();
+        bool got = take_job(w, &j, now, &wait);
+        plat_unlock();
+        if (got) {
+            run_job(w, &j);
+            rest_after(w, now);
+        } else {
+            plat_sleep_ms(wait < 1 ? 1 : wait > 5 ? 5 : wait);
+        }
+    }
+}
+
 void server_run(void)
 {
+    plat_lock();
+    stopping = false;
+    plat_unlock();
+    for (int i = 1; i < nworkers; i++) {
+        workers[i].thread = plat_thread_start(worker_main, &workers[i]);
+        if (!workers[i].thread)
+            core_log("could not start worker %d: using fewer CPU cores", i + 1);
+    }
+    int running = 1;
+    for (int i = 1; i < nworkers; i++)
+        running += workers[i].thread != NULL;
+    plat_lock();
+    running_workers = running;
+    plat_unlock();
+    core_log("encoding on %d CPU core%s", running, running == 1 ? "" : "s");
+
     uint64_t boosted_at = 0;
+    worker_t *w = &workers[0];
     while (!plat_should_exit()) {
         uint64_t now = plat_now_ms();
+        job_t j;
+        int wait;
+        plat_lock();
         update_stats(now);
-
-        unsigned wanted = wanted_screens();
-        if (wanted && boost_supported && settings.boost && now - boosted_at >= BOOST_REFRESH_MS) {
+        bool boost = wanted_screens() && boost_supported && settings.boost &&
+                     now - boosted_at >= BOOST_REFRESH_MS;
+        bool got = take_job(w, &j, now, &wait);
+        plat_unlock();
+        if (boost) {
             plat_set_cpu_boost(true);
             boosted_at = now;
         }
-        int wait = 50;
-        int s = wanted ? pick_screen(now, &wait, wanted) : -1;
-        if (s >= 0) {
-            screens[s].last_start = now;
-            screens[s].pass += (uint64_t)interval_ms(s);
-            produce(s, wanted);
-            uint32_t took = (uint32_t)(plat_now_ms() - now);
-            busy_ms_window += took;
-            /* Give the rest of the system a turn (server_config.rest_pct). */
-            if (cfg.rest_pct > 0) {
-                int rest = (int)(took * (uint32_t)cfg.rest_pct / 100);
-                plat_sleep_ms(rest < 1 ? 1 : rest);
-            }
+        if (got) {
+            run_job(w, &j);
+            rest_after(w, now);
             net_pump(0);
         } else {
             net_pump(wait < 1 ? 1 : wait);
         }
     }
+
+    plat_lock();
+    stopping = true;
+    plat_unlock();
+    for (int i = 1; i < nworkers; i++)
+        if (workers[i].thread)
+            plat_thread_join(workers[i].thread);
 }
 
 void server_stop(void)
 {
+    plat_lock();
     for (int i = 0; clients && i < max_clients; i++)
         client_close(&clients[i]);
     if (listen_fd >= 0) {
         close(listen_fd);
         listen_fd = -1;
     }
+    plat_unlock();
     core_log("stopped");
 }

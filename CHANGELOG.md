@@ -6,6 +6,25 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.3.0 (2026-10-18)
+
+- **Smoother on an Old 3DS.**
+  - Each screen is now sent as two halves. On an Old 3DS, two halves can be
+    compressed at the same time: one on the system core and one on the
+    game's core, using only time the game or HOME Menu leaves unused.
+  - A half that didn't change isn't compressed or sent again.
+  - "Faster, less detail" is now on by default on an Old 3DS. Turn it off in
+    Settings for a sharper but slower picture.
+- **Fixed (hopefully):** games didn't stream. 0.2.11 ran the service at the
+  lowest priority, so a running game could take all of its time. It now
+  runs above the game's background work and takes a break after every
+  picture, like ChirunoMod, so both the game and the HOME Menu get their
+  share. The second half-screen worker stays at the lowest priority so it
+  can never slow a game down.
+- If a game's screen can't be found, the log now says how many programs
+  were checked, to help track it down.
+- "Show stats" also says how many processor cores are working.
+
 ## 0.2.11 (2026-10-18)
 
 - **Fixed (hopefully):** app banners stopped showing on the HOME Menu while

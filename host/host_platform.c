@@ -8,7 +8,9 @@
  *   TDSL_BOTTOM_STATIC=1 keeps the bottom screen still
  */
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700 /* PTHREAD_MUTEX_RECURSIVE */
 #include <arpa/inet.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,6 +26,63 @@ static bool bottom_static;
 static bool bottom_broken; /* capture of the bottom screen always fails */
 static uint8_t *fb[SCREEN_COUNT];
 static const int lines_of[SCREEN_COUNT] = { 400, 320 };
+
+/* The "display" redraws while workers copy from it, so both take this. */
+static pthread_mutex_t fb_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t server_lock;
+
+void plat_lock(void)
+{
+    pthread_mutex_lock(&server_lock);
+}
+
+void plat_unlock(void)
+{
+    pthread_mutex_unlock(&server_lock);
+}
+
+typedef struct {
+    pthread_t t;
+    void (*fn)(void *);
+    void *arg;
+} host_thread;
+
+static void *thread_entry(void *p)
+{
+    host_thread *h = p;
+    h->fn(h->arg);
+    return NULL;
+}
+
+void *plat_thread_start(void (*fn)(void *), void *arg)
+{
+    host_thread *h = malloc(sizeof(*h));
+    if (!h)
+        return NULL;
+    h->fn = fn;
+    h->arg = arg;
+    if (pthread_create(&h->t, NULL, thread_entry, h) != 0) {
+        free(h);
+        return NULL;
+    }
+    return h;
+}
+
+void plat_thread_join(void *thread)
+{
+    host_thread *h = thread;
+    pthread_join(h->t, NULL);
+    free(h);
+}
+
+struct capture_ctx {
+    int screen;
+};
+
+capture_ctx *capture_ctx_create(void)
+{
+    return calloc(1, sizeof(capture_ctx));
+}
 
 uint64_t plat_now_ms(void)
 {
@@ -123,29 +182,34 @@ static void render(int s, uint64_t t)
     }
 }
 
-int capture_begin(int screen, frame_geom *g)
+int capture_begin(capture_ctx *c, int screen, frame_geom *g)
 {
     if (screen == SCREEN_BOTTOM && bottom_broken)
         return -1;
+    c->screen = screen;
     g->format = formats[screen];
     g->width = 240;
     g->lines = lines_of[screen];
     g->stride = 240 * pix_bytes(g->format);
+    pthread_mutex_lock(&fb_lock);
     render(screen, plat_now_ms());
+    pthread_mutex_unlock(&fb_lock);
     return 0;
 }
 
 /* The PC "copy" happens right away; waiting for it is a no-op. */
-int capture_start(int screen, int first, int count, uint8_t *dst)
+int capture_start(capture_ctx *c, int first, int count, uint8_t *dst)
 {
-    int stride = 240 * pix_bytes(formats[screen]);
-    memcpy(dst, fb[screen] + first * stride, (size_t)(count * stride));
+    int stride = 240 * pix_bytes(formats[c->screen]);
+    pthread_mutex_lock(&fb_lock);
+    memcpy(dst, fb[c->screen] + first * stride, (size_t)(count * stride));
+    pthread_mutex_unlock(&fb_lock);
     return 0;
 }
 
-int capture_wait(int screen)
+int capture_wait(capture_ctx *c)
 {
-    (void)screen;
+    (void)c;
     return 0;
 }
 
@@ -154,9 +218,9 @@ void plat_log_write(const char *line, int len)
     fwrite(line, 1, (size_t)len, stderr);
 }
 
-void capture_end(int screen)
+void capture_end(capture_ctx *c)
 {
-    (void)screen;
+    (void)c;
 }
 
 static void on_signal(int sig)
@@ -174,6 +238,11 @@ int main(int argc, char **argv)
     bottom_static = (e = getenv("TDSL_BOTTOM_STATIC")) && atoi(e);
     bottom_broken = (e = getenv("TDSL_BOTTOM_BROKEN")) && atoi(e);
 
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&server_lock, &ma);
+
     for (int s = 0; s < SCREEN_COUNT; s++)
         fb[s] = calloc(1, (size_t)(400 * 240 * 4));
 
@@ -186,15 +255,18 @@ int main(int argc, char **argv)
         .port = port,
         .version = TDSL_VERSION,
         .model = "PC test harness",
-        .max_slots = 3,
-        .slot_bytes = 56 * 1024,
-        .min_slot_bytes = 24 * 1024,
-        .strip_bytes = 32 * 960,
-        .reserve_bytes = 48 * 1024,
+        .max_slots = 8,
+        .slot_bytes = 24 * 1024,
+        .min_slot_bytes = 12 * 1024,
+        .strip_bytes = 20 * 1024,
+        .reserve_bytes = 80 * 1024,
         .max_clients = 6,  /* same limits as an Old 3DS */
         .max_streams = 2,
         .stream_sndbuf = 32 * 1024,
-        .rest_pct = 15,
+        .rest_pct = 30,
+        .helper_rest_pct = 5,
+        .workers = 2,     /* like an Old 3DS */
+        .tiles = 2,
         .quality = 70,
         .fps_top = 30,
         .fps_bottom = 20,

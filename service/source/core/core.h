@@ -48,21 +48,37 @@ static inline int pix_bytes(int format)
 
 /* ---- platform ---------------------------------------------------------- */
 
+/* Capture state for one worker thread (each copies on its own). */
+typedef struct capture_ctx capture_ctx;
+capture_ctx *capture_ctx_create(void);
+
 /* Read the current framebuffer geometry for a screen. 0 on success. */
-int capture_begin(int screen, frame_geom *geom);
+int capture_begin(capture_ctx *c, int screen, frame_geom *geom);
 
 /* Start copying `count` framebuffer lines starting at `first` into dst, laid
  * out with geom->stride bytes per line, without waiting for the copy, so it
- * can run while the previous lines are encoded. One copy per screen at a
+ * can run while the previous lines are encoded. One copy per context at a
  * time. 0 on success. */
-int capture_start(int screen, int first, int count, uint8_t *dst);
+int capture_start(capture_ctx *c, int first, int count, uint8_t *dst);
 
 /* Wait for the copy capture_start() began. 0 once dst holds the lines. */
-int capture_wait(int screen);
+int capture_wait(capture_ctx *c);
 
 /* Called once per successful capture_begin(), after the last copy. Also
  * cancels a copy that is still running. */
-void capture_end(int screen);
+void capture_end(capture_ctx *c);
+
+/* ---- threads ------------------------------------------------------------ */
+
+/* One lock guards everything the worker threads share. It is recursive, so a
+ * function holding it may call core_log() (which takes it too). */
+void plat_lock(void);
+void plat_unlock(void);
+
+/* Run fn(arg) on another CPU core, at the lowest priority, so it only gets
+ * time nothing else there wants. NULL if that isn't possible. */
+void *plat_thread_start(void (*fn)(void *), void *arg);
+void  plat_thread_join(void *thread);
 
 /* Monotonic milliseconds. */
 uint64_t plat_now_ms(void);

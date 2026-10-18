@@ -27,7 +27,12 @@
 #define O3DS_SOC  0x10000
 #define N3DS_SOC  0x40000
 
-#define SERVER_PRIORITY 0x3F /* the lowest there is */
+/* The server thread (network + first worker) runs above the HOME Menu's and
+ * most game threads, like ChirunoMod, and takes a break after every picture
+ * (rest_pct) so they still get their share. Extra workers only use idle
+ * time: the lowest priority there is. */
+#define SERVER_PRIORITY 0x20
+#define HELPER_PRIORITY 0x3F
 #define NOTIF_TERMINATE 0x100
 #define HID_PAD_REG     0x1EC46000 /* mapped via the exheader IO mappings */
 #define COMBO_HOLD_MS   2000
@@ -210,6 +215,33 @@ bool plat_set_cpu_boost(bool on)
 
 /* ---- entry -------------------------------------------------------------- */
 
+static RecursiveLock server_lock;
+
+void plat_lock(void)
+{
+    RecursiveLock_Lock(&server_lock);
+}
+
+void plat_unlock(void)
+{
+    RecursiveLock_Unlock(&server_lock);
+}
+
+void *plat_thread_start(void (*fn)(void *), void *arg)
+{
+    /* Only used on the Old 3DS: the server runs on core 1, this goes on the
+     * game's core 0 at the lowest priority, so the game always comes first. */
+    return threadCreate(fn, arg, 0x4000, HELPER_PRIORITY, new3ds ? 3 : 0, false);
+}
+
+void plat_thread_join(void *thread)
+{
+    /* A worker starved by a busy game may take a moment to notice; don't
+     * hang the shutdown on it. */
+    if (R_SUCCEEDED(threadJoin(thread, 2000000000ULL)))
+        threadFree(thread);
+}
+
 static void run_server(void *arg)
 {
     (void)arg;
@@ -219,6 +251,7 @@ static void run_server(void *arg)
 int main(void)
 {
     new3ds = detect_new3ds();
+    RecursiveLock_Init(&server_lock);
     srvEnableNotification(&notif_sem);
 
     if (R_SUCCEEDED(fsInit()) &&
@@ -242,30 +275,40 @@ int main(void)
         .port = 8080,
         .version = TDSL_VERSION,
         .model = new3ds ? "New 3DS" : "Old 3DS",
-        .max_slots = new3ds ? 6 : 3,
-        .slot_bytes = new3ds ? 160 * 1024 : 56 * 1024,
-        .min_slot_bytes = new3ds ? 64 * 1024 : 28 * 1024,
-        /* New 3DS copies a whole frame per DMA; Old 3DS 32 lines at a time. */
-        .strip_bytes = new3ds ? 400 * 960 : 32 * 960,
-        .reserve_bytes = new3ds ? 96 * 1024 : 40 * 1024,
+        /* Pictures are tiles (half a screen each): four are kept as the
+         * newest, each worker encodes into one, and viewers send the rest. */
+        .max_slots = 8,
+        .slot_bytes = new3ds ? 96 * 1024 : 24 * 1024,
+        .min_slot_bytes = new3ds ? 48 * 1024 : 12 * 1024,
+        /* New 3DS copies a whole tile per DMA; Old 3DS ~10 lines at a time. */
+        .strip_bytes = new3ds ? 400 * 960 : 20 * 1024,
+        /* libjpeg needs ~25 KB per worker while encoding, plus the second
+         * worker's stack. */
+        .reserve_bytes = new3ds ? 96 * 1024 : 80 * 1024,
         .max_clients = new3ds ? 8 : 6,
         .max_streams = new3ds ? 3 : 2,
         /* Old 3DS: socket buffers come out of the 64 KB SOC area, keep the default. */
         .stream_sndbuf = new3ds ? 32 * 1024 : 0,
-        /* Old 3DS: the service shares its CPU core with the HOME Menu, which
-         * stopped loading banners while we encoded flat out. ChirunoMod
-         * rests too. The New 3DS's third core is ours alone. */
-        .rest_pct = new3ds ? 0 : 15,
+        /* Old 3DS: the server shares its core with the HOME Menu (which
+         * stopped loading banners while we encoded flat out) and the game's
+         * system threads. ChirunoMod rests too. The New 3DS's third core is
+         * ours alone. */
+        .rest_pct = new3ds ? 0 : 30,
+        .helper_rest_pct = 5,
+        /* Old 3DS: a second worker on the game's core (0) uses whatever time
+         * the game or HOME Menu leaves idle. The New 3DS is fast enough with
+         * its third core alone. */
+        .workers = new3ds ? 1 : 2,
+        .tiles = 2,
         .quality = new3ds ? 75 : 60,
         .fps_top = 30,
         .fps_bottom = new3ds ? 30 : 15,
+        .fast = !new3ds, /* Old 3DS: smooth first; full detail is a setting */
     };
 
     if (server_start(&cfg) != 0)
         core_log("server_start failed");
     else {
-        /* Lowest priority: anything else on the core (the HOME Menu, a game,
-         * other system modules) goes first, and we use the time left over. */
         Thread t = NULL;
         if (new3ds) {
             /* The New 3DS's third core is usually idle: encode there so
