@@ -6,6 +6,14 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.8 (2026-10-18)
+
+- **Fixed (hopefully):** "Service did not answer". The logs showed the 3DS
+  rejecting the service's request to start accepting connections
+  ("listen ... failed (errno 9)"). The service asked for a queue of 4 waiting
+  connections; it now asks for 1, exactly like the proven ChirunoMod module.
+  Browsers retry automatically, so nothing else changes for you.
+
 ## 0.2.7 (2026-10-18)
 
 - **New bottom screen.** Big buttons you can tap (or press A, X or START):

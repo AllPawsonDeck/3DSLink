@@ -612,8 +612,9 @@ static void client_flush(client_t *c, uint64_t now)
 
 /*
  * Open the listening socket the way HzMod/ChirunoMod do on real hardware:
- * only once Wi-Fi has an address, bound to that address, and without
- * SO_REUSEADDR. Binding to INADDR_ANY is only tried as a fallback.
+ * only once Wi-Fi has an address, bound to that address, without
+ * SO_REUSEADDR, and with a listen backlog of 1 (an Old 3DS rejected 4 and 8
+ * with errno 9). Binding to INADDR_ANY is only tried as a fallback.
  */
 static void open_listener(uint64_t now)
 {
@@ -657,7 +658,7 @@ static void open_listener(uint64_t now)
     int rc = bind(fd, (struct sockaddr *)&sa, sizeof(sa));
     if (rc == 0) {
         step = "listen";
-        rc = listen(fd, 4);
+        rc = listen(fd, 1);
     }
     if (rc < 0) {
         if (loud) {
