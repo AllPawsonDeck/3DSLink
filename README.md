@@ -11,6 +11,7 @@ capture card, no Java and no desktop app. It works with Discord screen sharing.
 - **Pop out** window with nothing but the screens, ready for Discord
 - Quality and frame-rate controls in the browser
 - Old 3DS / 2DS and New 3DS / 2DS XL
+- A 3D HOME Menu banner: turn up the 3D slider while 3DSLink is highlighted
 
 > **Status:** 0.2.0 is a ground-up rewrite. The streaming core and browser
 > viewer are tested automatically against real Chromium, but the 3DS-side
@@ -140,7 +141,10 @@ GitHub Actions builds every push and runs the browser test. To publish a
 release (which the QR code above always points to), bump `VERSION` and push to
 `main`.
 
-Other tools: `make art` redraws the icon and banner (`tools/make_art.py`), and
+Other tools: `make art` redraws the icon and the flat banner picture
+(`tools/make_art.py`); `tools/make_banner3d.py --pycgfx <path>` rebuilds the
+3D banner model `app/assets/banner.cgfx` with
+[pycgfx](https://github.com/skyfloogle/pycgfx) and writes a preview; and
 `tools/cia_info.py` prints a CIA's title ID and exheader basics.
 
 ## Credits
@@ -153,6 +157,7 @@ Other tools: `make art` redraws the icon and banner (`tools/make_art.py`), and
 - [libctru](https://github.com/devkitPro/libctru), devkitARM,
   [libjpeg-turbo](https://libjpeg-turbo.org/),
   [Luma3DS](https://github.com/LumaTeam/Luma3DS).
+- 3D banner: [pycgfx](https://github.com/skyfloogle/pycgfx) by skyfloogle.
 - Install QR code: [Nayuki's QR Code generator](https://www.nayuki.io/page/qr-code-generator-library) (MIT).
 
 ## License
