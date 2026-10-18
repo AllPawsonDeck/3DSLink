@@ -42,8 +42,7 @@ new app replaces both.
 
 1. Connect the 3DS and the computer to the **same Wi-Fi network**.
 2. Open **3DSLink** on the 3DS. The top screen shows an address such as
-   `192.168.1.47:8080` and a QR code for it. Open that address in Chrome, or
-   scan the QR code with the Chromebook's Camera app.
+   `192.168.1.47:8080`. Type it into Chrome's address bar on your computer.
 3. Press **HOME** and start a game. The stream keeps going in the background.
 
 In the browser:
@@ -154,9 +153,9 @@ Other tools: `make art` redraws the icon and banner (`tools/make_art.py`), and
 - [libctru](https://github.com/devkitPro/libctru), devkitARM,
   [libjpeg-turbo](https://libjpeg-turbo.org/),
   [Luma3DS](https://github.com/LumaTeam/Luma3DS).
-- QR codes: [Nayuki's QR Code generator](https://www.nayuki.io/page/qr-code-generator-library) (MIT).
+- Install QR code: [Nayuki's QR Code generator](https://www.nayuki.io/page/qr-code-generator-library) (MIT).
 
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
-`app/source/vendor/qrcodegen.*` is MIT-licensed (see the file headers).
+`tools/vendor/qrcodegen.*` is MIT-licensed (see the file headers).

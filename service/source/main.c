@@ -10,7 +10,9 @@
  */
 #include <3ds.h>
 #include <3ds/allocator/mappable.h>
+#include <arpa/inet.h>
 #include <malloc.h>
+#include <netinet/in.h>
 #include <string.h>
 
 #include "capture.h"
@@ -113,7 +115,9 @@ bool plat_should_exit(void)
      * registers so we don't need an hid:USER session. */
     u32 held = ~(u32)*(vu16 *)HID_PAD_REG & 0xFFF;
     u64 now = plat_now_ms();
-    if ((held & (KEY_START | KEY_SELECT)) == (KEY_START | KEY_SELECT)) {
+    /* Exactly START + SELECT: a register that reads back as all-pressed must
+     * never look like the combo. */
+    if (held == (KEY_START | KEY_SELECT)) {
         if (!combo_since)
             combo_since = now;
         else if (now - combo_since >= COMBO_HOLD_MS) {
@@ -181,8 +185,10 @@ uint32_t plat_net_address(void)
     u64 now = plat_now_ms();
     if (!checked || now - checked >= 1000) {
         checked = now;
-        long id = gethostid();
-        addr = id > 0 && id != 0x7F000001 ? (u32)id : 0;
+        /* gethostid() is a signed long: negative for x.x.x.128 and up. */
+        addr = (u32)gethostid();
+        if (addr == htonl(INADDR_LOOPBACK) || addr == 0xFFFFFFFF)
+            addr = 0;
     }
     return addr;
 }
@@ -259,6 +265,7 @@ int main(void)
              * games never feel it. */
             t = threadCreate(run_server, NULL, 0x4000, 0x30, 2, false);
         }
+        core_log("server running on core %d", t ? 2 : 1);
         if (t) {
             threadJoin(t, U64_MAX);
             threadFree(t);

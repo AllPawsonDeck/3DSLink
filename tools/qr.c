@@ -1,8 +1,8 @@
 /*
- * Prints a QR code for TEXT as SVG (default) or PBM, using the same QR
- * library the 3DS app uses. Builds the install QR in the README:
+ * Prints a QR code for TEXT as SVG (default) or PBM. Builds the install QR
+ * code in the README:
  *
- *   cc -O2 -Iapp/source/vendor tools/qr.c app/source/vendor/qrcodegen.c -o build/qr
+ *   cc -O2 -Itools/vendor tools/qr.c tools/vendor/qrcodegen.c -o build/qr
  *   build/qr https://github.com/.../3DSLink.cia > docs/install-qr.svg
  */
 #include <stdio.h>

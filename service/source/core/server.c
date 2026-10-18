@@ -632,7 +632,7 @@ static void open_listener(uint64_t now)
     sa.sin_family = AF_INET;
     sa.sin_port = htons((uint16_t)cfg.port);
     sa.sin_addr.s_addr = htonl(INADDR_ANY);
-    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 || listen(fd, 8) < 0) {
+    if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0 || listen(fd, 4) < 0) {
         core_log("port %d busy (errno %d), retrying", cfg.port, errno);
         close(fd);
         listen_retry_at = now + 1000;
