@@ -10,6 +10,7 @@
 #include <malloc.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +73,34 @@ static void frame(void)
 
 static u16 canvas[UI_W * UI_H];
 
+/* Easter egg: the Konami code shows Clawd for 3 seconds, then fades him out. */
+#define CLAWD_SHOW_MS 3000
+#define CLAWD_FADE_MS 1000
+static const u32 konami[] = { KEY_UP, KEY_UP, KEY_DOWN, KEY_DOWN, KEY_LEFT,
+                              KEY_RIGHT, KEY_LEFT, KEY_RIGHT, KEY_B, KEY_A };
+static int konami_pos;
+static u64 clawd_since; /* 0 when not showing */
+
+/* Feed key presses in; returns true when the code was just completed. */
+static bool konami_step(u32 down)
+{
+    u32 keys = down & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_A | KEY_B);
+    if (!keys)
+        return false;
+    if (keys & konami[konami_pos]) {
+        if (++konami_pos == (int)(sizeof(konami) / sizeof(konami[0]))) {
+            konami_pos = 0;
+            return true;
+        }
+    } else if (keys & KEY_UP) {
+        /* An extra Up still leaves the last two presses as "Up, Up". */
+        konami_pos = konami_pos == 2 ? 2 : 1;
+    } else {
+        konami_pos = 0;
+    }
+    return false;
+}
+
 static void draw_top(void)
 {
     ui_state ui = {
@@ -84,6 +113,12 @@ static void draw_top(void)
         .version = TDSL_VERSION,
     };
     ui_draw_top(&ui, canvas, consoleGetDefault()->font.gfx);
+    if (clawd_since) {
+        u64 t = osGetTime() - clawd_since;
+        int alpha = t < CLAWD_SHOW_MS ? 256 : (int)(256 * (CLAWD_SHOW_MS + CLAWD_FADE_MS - t) / CLAWD_FADE_MS);
+        int bob = (int)lrintf(4.0f * sinf((float)t / 160.0f));
+        ui_overlay_clawd(canvas, consoleGetDefault()->font.gfx, alpha, bob);
+    }
 
     /* The LCD is mounted sideways: each 240-pixel line is one screen column.
      * Copying a finished image in one go means nothing ever flickers. */
@@ -467,6 +502,11 @@ int main(void)
         u32 down = hidKeysDown(), held = hidKeysHeld(), repeat = hidKeysDownRepeat();
         bool changed = down != 0;
 
+        if (konami_step(down)) {
+            clawd_since = osGetTime();
+            down &= ~KEY_A; /* the final A is part of the code, not "Restart" */
+        }
+
         /* Touch: highlight what's under the stylus and act on it right away. */
         int tap = BTN_NONE;
         if (down & KEY_TOUCH) {
@@ -512,6 +552,13 @@ int main(void)
             if ((repeat & KEY_DDOWN) || tap == BTN_SCROLL_DOWN)
                 scroll_by(tap == BTN_SCROLL_DOWN ? UI_LOG_VISIBLE / 2 : 1);
             changed |= (repeat & (KEY_DUP | KEY_DDOWN)) != 0;
+        }
+
+        /* Clawd animates every frame while he's on screen. */
+        if (clawd_since) {
+            if (osGetTime() - clawd_since >= CLAWD_SHOW_MS + CLAWD_FADE_MS)
+                clawd_since = 0;
+            draw_top();
         }
 
         /* Redraw once a second, and right away after any input. */

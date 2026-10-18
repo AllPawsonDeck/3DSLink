@@ -19,16 +19,28 @@
 #define C_RED    RGB(240, 100, 100)
 #define C_CYAN   RGB(110, 220, 255)
 #define C_PRESS  RGB(52, 62, 76)
+#define C_CLAWD  RGB(215, 119, 87)
 
 static uint16_t *canvas;
 static int cw; /* canvas width: 400 (top) or 320 (bottom) */
 static const uint8_t *font;
+static int opacity = 256; /* 256 = paint, less = blend over what's there */
+
+static uint16_t mix(uint16_t under, uint16_t over, int t)
+{
+    int r = ((under >> 11) * (256 - t) + (over >> 11) * t) >> 8;
+    int g = (((under >> 5) & 63) * (256 - t) + ((over >> 5) & 63) * t) >> 8;
+    int b = ((under & 31) * (256 - t) + (over & 31) * t) >> 8;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
 
 static void rect(int x, int y, int w, int h, uint16_t c)
 {
     for (int yy = y < 0 ? 0 : y; yy < y + h && yy < UI_H; yy++)
-        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < cw; xx++)
-            canvas[yy * cw + xx] = c;
+        for (int xx = x < 0 ? 0 : x; xx < x + w && xx < cw; xx++) {
+            uint16_t *p = &canvas[yy * cw + xx];
+            *p = opacity >= 256 ? c : mix(*p, c, opacity);
+        }
 }
 
 static void disc(int cx, int cy, int r, uint16_t c)
@@ -139,6 +151,47 @@ void ui_draw_top(const ui_state *ui, uint16_t *out, const uint8_t *font_gfx)
     }
 }
 
+
+/* ---- Easter egg ------------------------------------------------------------ */
+
+/* Clawd, as drawn by the block characters of the Claude Code logo
+ *    ▐▛███▜▌
+ *   ▝▜█████▛▘
+ *     ▘▘ ▝▝
+ * with each character split into its 2x2 quadrants. */
+static const char *const clawd[] = {
+    "...############...",
+    "...##.######.##...",
+    ".################.",
+    "...############...",
+    "....#.#....#.#....",
+};
+
+void ui_overlay_clawd(uint16_t *out, const uint8_t *font_gfx, int alpha, int bob)
+{
+    canvas = out;
+    cw = UI_W;
+    font = font_gfx;
+    if (alpha <= 0)
+        return;
+    if (alpha > 256)
+        alpha = 256;
+
+    /* Dim the screen behind, then Clawd and a caption on top. Pixels are
+     * twice as tall as wide, like the terminal cells Clawd comes from. */
+    opacity = alpha * 9 / 10;
+    rect(0, 0, UI_W, UI_H, RGB(8, 10, 14));
+    const int px = 10, py = 20;
+    const int w = 18 * px, h = 5 * py;
+    const int x0 = (UI_W - w) / 2, y0 = (UI_H - h) / 2 - 14 + bob;
+    opacity = alpha;
+    for (int row = 0; row < 5; row++)
+        for (int col = 0; col < 18; col++)
+            if (clawd[row][col] == '#')
+                rect(x0 + col * px, y0 + row * py, px, py, C_CLAWD);
+    text_center(y0 + h + 22, 1, C_TEXT, "You found Clawd!");
+    opacity = 256;
+}
 
 /* ---- bottom screen ---------------------------------------------------------- */
 

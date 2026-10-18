@@ -6,6 +6,11 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.9 (2026-10-18)
+
+- **Secret:** on the 3DSLink app, press Up, Up, Down, Down, Left, Right,
+  Left, Right, B, A.
+
 ## 0.2.8 (2026-10-18)
 
 - **Fixed (hopefully):** "Service did not answer". The logs showed the 3DS

@@ -23,6 +23,10 @@ typedef struct {
  * using an 8x8 font (8 bytes per glyph, high bit = leftmost pixel). */
 void ui_draw_top(const ui_state *ui, uint16_t *canvas, const uint8_t *font);
 
+/* Easter egg: Clawd over an already drawn top screen. alpha 0..256 fades it
+ * out; bob moves it up and down a few pixels. */
+void ui_overlay_clawd(uint16_t *canvas, const uint8_t *font, int alpha, int bob);
+
 /* ---- bottom screen ---------------------------------------------------------- */
 
 enum { TAB_HOME, TAB_LOGS };
