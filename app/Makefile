@@ -25,7 +25,7 @@ CFLAGS    := -std=gnu11 -g -O2 -Wall -Wextra -Wno-unused-parameter -mword-reloca
 LDFLAGS   := -specs=3dsx.specs -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(TARGET).map
 LIBS      := -L$(CTRULIB)/lib -lctru -lm
 
-SRCS      := source/main.c source/ui.c
+SRCS      := source/main.c source/ui.c source/tada.c
 OBJS      := $(patsubst source/%.c,$(BUILD)/obj/%.o,$(SRCS))
 
 all: $(TARGET).cia

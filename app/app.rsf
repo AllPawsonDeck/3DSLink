@@ -147,6 +147,7 @@ AccessControlInfo:
    - ac:u
    - am:net
    - cfg:u
+   - dsp::DSP
    - fs:USER
    - gsp::Gpu
    - hid:USER

@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "tada.h"
 #include "ui.h"
 
 #define SERVICE_TID   0x000401300CF10902ULL
@@ -81,6 +82,54 @@ static const u32 konami[] = { KEY_UP, KEY_UP, KEY_DOWN, KEY_DOWN, KEY_LEFT,
 static int konami_pos;
 static u64 clawd_since; /* 0 when not showing */
 
+/* The fanfare plays through the DSP, which needs sdmc:/3ds/dspfirm.cdc (most
+ * modded consoles have it). Without it the Easter egg is simply silent. */
+#define TADA_RATE 22050
+static bool audio_ok;
+static s16 *tada_pcm;
+static ndspWaveBuf tada_buf;
+
+static void audio_init(void)
+{
+    if (R_FAILED(ndspInit()))
+        return;
+    audio_ok = true;
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+    ndspChnReset(0);
+    ndspChnSetInterp(0, NDSP_INTERP_LINEAR);
+    ndspChnSetRate(0, TADA_RATE);
+    ndspChnSetFormat(0, NDSP_FORMAT_MONO_PCM16);
+    float mix[12] = { 1.0f, 1.0f };
+    ndspChnSetMix(0, mix);
+}
+
+static void audio_exit(void)
+{
+    if (audio_ok)
+        ndspExit();
+    if (tada_pcm)
+        linearFree(tada_pcm);
+}
+
+static void play_tada(void)
+{
+    if (!audio_ok)
+        return;
+    int n = tada_length(TADA_RATE);
+    if (!tada_pcm) {
+        tada_pcm = linearAlloc((size_t)n * sizeof(s16)); /* the DSP reads linear memory */
+        if (!tada_pcm)
+            return;
+        tada_render(tada_pcm, TADA_RATE);
+        DSP_FlushDataCache(tada_pcm, (u32)n * sizeof(s16));
+    }
+    ndspChnWaveBufClear(0);
+    memset(&tada_buf, 0, sizeof(tada_buf));
+    tada_buf.data_vaddr = tada_pcm;
+    tada_buf.nsamples = (u32)n;
+    ndspChnWaveBufAdd(0, &tada_buf);
+}
+
 /* Feed key presses in; returns true when the code was just completed. */
 static bool konami_step(u32 down)
 {
@@ -117,7 +166,7 @@ static void draw_top(void)
         u64 t = osGetTime() - clawd_since;
         int alpha = t < CLAWD_SHOW_MS ? 256 : (int)(256 * (CLAWD_SHOW_MS + CLAWD_FADE_MS - t) / CLAWD_FADE_MS);
         int bob = (int)lrintf(4.0f * sinf((float)t / 160.0f));
-        ui_overlay_clawd(canvas, consoleGetDefault()->font.gfx, alpha, bob);
+        ui_overlay_clawd(canvas, consoleGetDefault()->font.gfx, alpha, bob, (int)t);
     }
 
     /* The LCD is mounted sideways: each 240-pixel line is one screen column.
@@ -487,6 +536,7 @@ int main(void)
     bool force = (hidKeysHeld() & (KEY_L | KEY_R)) == (KEY_L | KEY_R);
 
     romfsInit();
+    audio_init();
     amInit();
     nsInit();
     u32 *soc_buf = memalign(0x1000, SOC_SIZE);
@@ -504,6 +554,7 @@ int main(void)
 
         if (konami_step(down)) {
             clawd_since = osGetTime();
+            play_tada();
             down &= ~KEY_A; /* the final A is part of the code, not "Restart" */
         }
 
@@ -585,6 +636,7 @@ int main(void)
     free(soc_buf);
     nsExit();
     amExit();
+    audio_exit();
     romfsExit();
     gfxExit();
     return 0;

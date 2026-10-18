@@ -9,7 +9,8 @@ To ship a new version: add a `## x.y.z` section here, put the same number in
 ## 0.2.9 (2026-10-18)
 
 - **Secret:** on the 3DSLink app, press Up, Up, Down, Down, Left, Right,
-  Left, Right, B, A.
+  Left, Right, B, A. Turn the sound up. (The sound needs
+  `sdmc:/3ds/dspfirm.cdc`, which most modded 3DS systems already have.)
 
 ## 0.2.8 (2026-10-18)
 

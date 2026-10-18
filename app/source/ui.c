@@ -2,6 +2,7 @@
  * 3DSLink app screens. Everything is drawn into an off-screen canvas so the
  * app can copy a finished frame to the LCD at once (no flicker).
  */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -167,7 +168,64 @@ static const char *const clawd[] = {
     "....#.#....#.#....",
 };
 
-void ui_overlay_clawd(uint16_t *out, const uint8_t *font_gfx, int alpha, int bob)
+/* Small deterministic pseudo-random numbers, so confetti needs no state. */
+static float rnd(unsigned i, unsigned salt)
+{
+    unsigned x = i * 2654435761u ^ salt * 2246822519u;
+    x ^= x >> 15;
+    x *= 2246822519u;
+    x ^= x >> 13;
+    return (float)(x & 0xFFFF) / 65535.0f;
+}
+
+/*
+ * Confetti: two party poppers fire from the bottom corners, and more pieces
+ * flutter down from the top for the whole show. Positions come straight from
+ * the time (no state): a burst that air drag slows down, then a gentle fall
+ * at paper speed with a side-to-side flutter.
+ */
+static void confetti(int t_ms)
+{
+    static const uint16_t colors[] = {
+        RGB(255, 154, 31), RGB(110, 220, 255), RGB(250, 215, 70), RGB(60, 207, 142),
+        RGB(240, 100, 150), RGB(170, 130, 255), RGB(255, 255, 255),
+    };
+    const unsigned ncolors = sizeof(colors) / sizeof(colors[0]);
+    const float t = (float)t_ms / 1000.0f, k = 3.0f;
+
+    for (unsigned i = 0; i < 160; i++) {
+        float x0, y0, vx = 0, vy = 0, delay;
+        if (i < 110) { /* poppers: left half from the left corner, rest from the right */
+            bool left = i < 55;
+            float ang = (left ? -82.0f + 40.0f * rnd(i, 1) : -138.0f + 40.0f * rnd(i, 1)) * 3.14159265f / 180.0f;
+            float speed = 420.0f + 300.0f * rnd(i, 2);
+            x0 = left ? 6.0f : (float)UI_W - 6.0f;
+            y0 = (float)UI_H + 4.0f;
+            vx = cosf(ang) * speed;
+            vy = sinf(ang) * speed;
+            delay = 0.08f * rnd(i, 3);
+        } else { /* rain from the top, spread over the show */
+            x0 = (float)UI_W * rnd(i, 1);
+            y0 = -10.0f;
+            delay = 2.4f * rnd(i, 3);
+        }
+        float tt = t - delay;
+        if (tt < 0)
+            continue;
+        float slow = (1.0f - expf(-k * tt)) / k;           /* burst, slowed by air */
+        float fall = (55.0f + 50.0f * rnd(i, 5)) * (tt - slow); /* then paper-speed fall */
+        float x = x0 + vx * slow + 12.0f * sinf(tt * (2.0f + 2.0f * rnd(i, 6)) + (float)i);
+        float y = y0 + vy * slow + fall;
+        if (y > (float)UI_H + 10.0f || x < -10.0f || x > (float)UI_W + 10.0f)
+            continue;
+        /* tumbling: each piece flips between wide and thin */
+        float spin = fabsf(cosf(tt * (5.0f + 6.0f * rnd(i, 4)) + (float)i));
+        int w = 3 + (int)(5.0f * spin), h = 8 - (int)(4.0f * spin);
+        rect((int)x - w / 2, (int)y - h / 2, w, h, colors[i % ncolors]);
+    }
+}
+
+void ui_overlay_clawd(uint16_t *out, const uint8_t *font_gfx, int alpha, int bob, int t_ms)
 {
     canvas = out;
     cw = UI_W;
@@ -189,7 +247,9 @@ void ui_overlay_clawd(uint16_t *out, const uint8_t *font_gfx, int alpha, int bob
         for (int col = 0; col < 18; col++)
             if (clawd[row][col] == '#')
                 rect(x0 + col * px, y0 + row * py, px, py, C_CLAWD);
+    text_center(y0 - 30, 1, RGB(250, 215, 70), "Achievement unlocked!");
     text_center(y0 + h + 22, 1, C_TEXT, "You found Clawd!");
+    confetti(t_ms); /* in front, so it flies past Clawd */
     opacity = 256;
 }
 
