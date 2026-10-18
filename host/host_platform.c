@@ -21,6 +21,7 @@
 static volatile sig_atomic_t stop_requested;
 static int formats[SCREEN_COUNT] = { PIX_BGR8, PIX_RGB565 };
 static bool bottom_static;
+static bool bottom_broken; /* capture of the bottom screen always fails */
 static uint8_t *fb[SCREEN_COUNT];
 static const int lines_of[SCREEN_COUNT] = { 400, 320 };
 
@@ -124,6 +125,8 @@ static void render(int s, uint64_t t)
 
 int capture_begin(int screen, frame_geom *g)
 {
+    if (screen == SCREEN_BOTTOM && bottom_broken)
+        return -1;
     g->format = formats[screen];
     g->width = 240;
     g->lines = lines_of[screen];
@@ -162,6 +165,7 @@ int main(int argc, char **argv)
     if ((e = getenv("TDSL_TOP_FORMAT"))) formats[SCREEN_TOP] = atoi(e) % 5;
     if ((e = getenv("TDSL_BOTTOM_FORMAT"))) formats[SCREEN_BOTTOM] = atoi(e) % 5;
     bottom_static = (e = getenv("TDSL_BOTTOM_STATIC")) && atoi(e);
+    bottom_broken = (e = getenv("TDSL_BOTTOM_BROKEN")) && atoi(e);
 
     for (int s = 0; s < SCREEN_COUNT; s++)
         fb[s] = calloc(1, (size_t)(400 * 240 * 4));

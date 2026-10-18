@@ -35,6 +35,7 @@ extern const unsigned int web_index_gz_len;
 #define BOUNDARY "3dslink"
 #define REQ_TIMEOUT_MS     5000
 #define STALL_TIMEOUT_MS  10000
+#define DRAIN_TIMEOUT_MS   3000  /* how long a finished response waits for the browser to hang up */
 #define KEEPALIVE_MS       2000  /* empty part sent when screens stay still */
 #define BOOST_REFRESH_MS  10000  /* a game launch resets the New 3DS clock */
 #define STATIC_POLL_MS      100  /* how often an unchanged screen is re-checked */
@@ -203,13 +204,14 @@ typedef struct {
     uint32_t encode_ms;   /* smoothed */
     uint32_t last_size;
     char error[64];
+    bool ok_logged;       /* "sending pictures" logged since the last error */
 } screen_t;
 
 static screen_t screens[SCREEN_COUNT];
 
 /* ---- clients ------------------------------------------------------------ */
 
-enum { C_FREE, C_REQ, C_RESP, C_STREAM };
+enum { C_FREE, C_REQ, C_RESP, C_DRAIN, C_STREAM };
 
 typedef struct {
     int fd;
@@ -561,6 +563,20 @@ static void queue_keepalive(client_t *c)
     c->first_part = false;
 }
 
+/*
+ * Closing a socket right after the last send() can cost the browser the end
+ * of the response (unsent data may be dropped, and a reset makes the browser
+ * throw away what it hasn't read yet): a cut-off page shows up blank. So the
+ * end of the response is marked with shutdown() and the socket is only closed
+ * once the browser hangs up too, or after DRAIN_TIMEOUT_MS.
+ */
+static void finish_response(client_t *c, uint64_t now)
+{
+    shutdown(c->fd, SHUT_WR);
+    c->state = C_DRAIN;
+    c->since = now;
+}
+
 /* Push as much pending output as the socket takes right now. */
 static void client_flush(client_t *c, uint64_t now)
 {
@@ -600,7 +616,7 @@ static void client_flush(client_t *c, uint64_t now)
             c->body_slot = -1;
         }
         if (c->state == C_RESP) {
-            client_close(c);
+            finish_response(c, now);
             return;
         }
         if (c->state != C_STREAM || !queue_frame(c))
@@ -702,6 +718,11 @@ static void accept_clients(uint64_t now)
         for (int i = 0; i < max_clients && !c; i++)
             if (clients[i].state == C_FREE)
                 c = &clients[i];
+        for (int i = 0; i < max_clients && !c; i++)
+            if (clients[i].state == C_DRAIN) /* done already; make room */
+                c = &clients[i];
+        if (c)
+            client_close(c);
         if (!c) {
             static const char busy[] =
                 "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
@@ -822,6 +843,7 @@ static void net_pump(int timeout_ms)
             continue;
         uint64_t idle = now - c->since;
         if ((c->state == C_REQ && idle > REQ_TIMEOUT_MS) ||
+            (c->state == C_DRAIN && idle > DRAIN_TIMEOUT_MS) ||
             (pending(c) && idle > STALL_TIMEOUT_MS))
             client_close(c);
     }
@@ -855,9 +877,10 @@ static bool geom_ok(const frame_geom *g)
 
 static void screen_error(screen_t *st, const char *msg)
 {
+    st->ok_logged = false;
     if (strcmp(st->error, msg)) {
         snprintf(st->error, sizeof(st->error), "%s", msg);
-        core_log("%s", msg);
+        core_log("%s screen: %s", screen_names[st - screens], msg);
     }
 }
 
@@ -979,6 +1002,12 @@ static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t
     if (st->quality_cut > 0 && ++st->good_run >= 60) {
         st->quality_cut -= 5;
         st->good_run = 0;
+    }
+
+    if (!st->ok_logged) {
+        st->ok_logged = true;
+        core_log("%s screen: sending pictures (%s, %u KB each)", screen_names[s],
+                 format_name(g.format), (unsigned)((len + 1023) / 1024));
     }
 
     slots[slot].len = len;

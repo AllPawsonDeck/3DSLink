@@ -118,9 +118,9 @@ a { color: var(--accent); }
     <canvas id="top" width="400" height="240" aria-label="Top screen"></canvas>
     <canvas id="bottom" width="320" height="240" aria-label="Bottom screen"></canvas>
   </div>
-  <div id="notice"><div class="card">
-    <h2 id="noticeTitle">Connecting to your 3DS…</h2>
-    <p id="noticeText">Keep the 3DS awake and on the same Wi-Fi as this computer.</p>
+  <div id="notice" class="show"><div class="card">
+    <h2 id="noticeTitle">Loading the viewer…</h2>
+    <p id="noticeText">If this message stays, the page didn't load completely. Reload it (Ctrl + R).</p>
     <div class="row" id="noticeActions"></div>
   </div></div>
   <div id="stats"></div>
@@ -408,7 +408,16 @@ function updateNotice() {
     addAction("Bring it back here", () => channel && channel.postMessage({ t: "close" }), true);
   } else if (state === "live") {
     const visible = Object.keys(LAYOUTS[prefs.layout].items);
-    if (!visible.some((v) => screens[v].got)) { title = "Connected"; text = "Waiting for the first frame…"; }
+    if (!visible.some((v) => screens[v].got)) {
+      title = "Connected";
+      text = "Waiting for the first frame…";
+      /* Say why, if the 3DS knows. */
+      const errs = visible.map((v) => remote && remote.screens && remote.screens[v] && remote.screens[v].error).filter(Boolean);
+      if (errs.length) {
+        title = "Connected, but no picture yet";
+        text = `The 3DS says: “${errs[0]}”. It keeps trying. On the 3DS, the Logs tab in the 3DSLink app explains more.`;
+      }
+    }
   } else if (stateDetail === "busy") {
     title = "Too many viewers";
     text = "Another window is already watching this 3DS. Close it, then this page reconnects by itself.";
@@ -489,6 +498,7 @@ async function pollStatus() {
     const r = await fetch(base + "/api/status", { cache: "no-store" });
     remote = await r.json();
     showRemoteSettings(remote.settings);
+    updateNotice();
     const up = remote.uptime, h = Math.floor(up / 3600), m = Math.floor(up / 60) % 60;
     const rows = [
       ["Model", remote.model], ["Address", remote.ip ? `http://${remote.ip}:${location.port || 8080}/` : "–"],

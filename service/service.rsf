@@ -56,7 +56,7 @@ AccessControlInfo:
    - 1ec46000-1ec46fff     # HID (START + SELECT emergency stop)
 
   MemoryMapping:
-   - 1f000000-1f5fffff:r   # VRAM, where most framebuffers live
+   - 1f000000-1f5fffff     # VRAM, where most framebuffers live (read-write, like ChirunoMod)
 
   SystemCallAccess:
     ControlMemory: 1

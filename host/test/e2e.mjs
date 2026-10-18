@@ -3,6 +3,7 @@
 // layouts request only visible screens, and that the viewer reconnects.
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import net from "node:net";
 
 // Resolved through NODE_PATH so a globally installed Playwright works too.
 const { chromium } = createRequire(import.meta.url)("playwright");
@@ -62,6 +63,22 @@ try {
   if (bottomNew !== 0) fail("bottom screen still being captured in top-only layout");
   if (topNew < 30) fail("top screen did not speed up when it had the 3DS to itself");
 
+  // A finished response ends with the 3DS hanging up (FIN), not a reset, and
+  // nothing is cut off: read a plain response to the end.
+  const raw = await new Promise((resolve, reject) => {
+    const t0 = Date.now(), chunks = [];
+    const sock = net.connect(port, "127.0.0.1", () => sock.write("GET /api/status HTTP/1.1\r\nHost: x\r\n\r\n"));
+    sock.on("data", (d) => chunks.push(d));
+    sock.on("end", () => { sock.end(); resolve({ text: Buffer.concat(chunks).toString(), ms: Date.now() - t0 }); });
+    sock.on("error", reject);
+    setTimeout(() => reject(new Error("response never ended")), 3000);
+  });
+  const [head, body] = raw.text.split("\r\n\r\n");
+  const declared = Number(/Content-Length: (\d+)/.exec(head)[1]);
+  console.log(`raw response: ${Buffer.byteLength(body)} of ${declared} bytes, ended after ${raw.ms} ms`);
+  if (Buffer.byteLength(body) !== declared) fail("response body cut off");
+  if (raw.ms > 1500) fail("server did not end the response promptly");
+
   // Settings round-trip.
   await page.evaluate(() => fetch("/api/settings?quality=40&fps_top=12"));
   const st2 = await getStatus();
@@ -100,6 +117,14 @@ try {
   await popup.close();
   await page.waitForFunction(() => document.getElementById("statusText").textContent.startsWith("Live"), null, { timeout: 8000 });
   console.log("main tab resumed after pop-out closed");
+
+  // When a screen can't be captured, the page says why instead of staying blank.
+  server.kill("SIGTERM");
+  await sleep(500);
+  server = spawn(bin, [String(port)], { env: { ...env, TDSL_BOTTOM_BROKEN: "1" }, stdio: ["ignore", "inherit", "inherit"] });
+  await page.keyboard.press("4");
+  await page.waitForFunction(() => document.getElementById("noticeText").textContent.includes("The 3DS says"), null, { timeout: 10000 });
+  console.log("broken bottom screen:", await page.evaluate(() => document.getElementById("noticeText").textContent));
 
   if (errors.length) fail("page errors: " + errors.join(" | "));
 } catch (e) {

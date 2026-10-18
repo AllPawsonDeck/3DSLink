@@ -6,6 +6,23 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.10 (2026-10-18)
+
+- **Fixed (hopefully):** the viewer page loaded but stayed completely blank.
+  Two likely causes, both changed:
+  - The 3DS closed each connection the moment it finished sending, which can
+    cut off the end of the page, so its code never ran. It now waits for the
+    browser to finish reading before it hangs up.
+  - Copying the screen picture now follows the proven ChirunoMod
+    module: it waits for each copy the same way, and maps the 3DS's video
+    memory the same way.
+- **The page always says something now.** If the picture can't be captured,
+  it shows the reason from the 3DS instead of black screens. If the page
+  itself didn't load completely, it tells you to reload.
+- **More detailed logs.** The Logs tab on the 3DS now says where each screen's
+  picture is, the exact error code when copying it fails, and "sending
+  pictures" once it works.
+
 ## 0.2.9 (2026-10-18)
 
 - **Secret:** on the 3DSLink app, press Up, Up, Down, Down, Left, Right,

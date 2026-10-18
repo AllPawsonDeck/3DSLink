@@ -9,6 +9,8 @@
  * Old 3DS memory budget is never exceeded.
  */
 #include <3ds.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "capture.h"
@@ -16,7 +18,8 @@
 
 #define VRAM_START 0x1F000000u
 #define VRAM_END   0x1F600000u
-#define DMA_TIMEOUT_NS (50 * 1000 * 1000LL)
+#define DMA_TIMEOUT_NS (20 * 1000 * 1000LL)
+#define WAIT_TIMED_OUT 0x09401BFE /* svcWaitSynchronization's timeout result */
 
 static Handle gsp;
 static u32 own_pid;
@@ -33,6 +36,27 @@ static struct {
     Handle proc;
     frame_geom geom;
 } cur[SCREEN_COUNT];
+
+/*
+ * The service log says what capture found and why it failed, but each kind
+ * of message only when it changes: a failure repeated every frame shows up
+ * once. "where" notes come from capture_begin, "copy" notes from the DMA.
+ */
+enum { NOTE_WHERE, NOTE_COPY, NOTE_KINDS };
+static char last_note[SCREEN_COUNT][NOTE_KINDS][80];
+
+static void note(int screen, int kind, const char *fmt, ...)
+{
+    char msg[80];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    if (strcmp(msg, last_note[screen][kind])) {
+        strcpy(last_note[screen][kind], msg);
+        core_log("%s screen: %s", screen == SCREEN_TOP ? "top" : "bottom", msg);
+    }
+}
 
 int capture_init(void)
 {
@@ -115,22 +139,36 @@ static Handle open_owner(u32 addr, u32 size)
 
 int capture_begin(int screen, frame_geom *g)
 {
-    if (R_FAILED(import_capture_info(&info)))
+    Result rc = import_capture_info(&info);
+    if (R_FAILED(rc)) {
+        note(screen, NOTE_WHERE, "GSP gave no screen info (%08lX)", (unsigned long)rc);
         return -1;
+    }
 
     const GSPGPU_CaptureInfoEntry *e = &info.screencapture[screen];
+    u32 addr = (u32)e->framebuf0_vaddr;
     g->format = (int)(e->format & 7);
     g->width = 240;
     g->lines = screen == SCREEN_TOP ? 400 : 320;
     g->stride = (int)e->framebuf_widthbytesize;
-    if (g->format > PIX_RGBA4 || !e->framebuf0_vaddr || g->stride < 240 * pix_bytes(g->format))
+    if (g->format > PIX_RGBA4 || !addr || g->stride < 240 * pix_bytes(g->format)) {
+        note(screen, NOTE_WHERE, "odd screen info (at %08lX, format %lX, stride %d)",
+             (unsigned long)addr, (unsigned long)e->format, g->stride);
         return -1;
+    }
 
-    u32 addr = (u32)e->framebuf0_vaddr;
     capture_end(screen);
     Handle proc = open_owner(addr, (u32)g->stride * (u32)g->lines);
-    if (!proc)
+    if (!proc) {
+        note(screen, NOTE_WHERE, "no process has its picture (at %08lX)", (unsigned long)addr);
         return -1;
+    }
+    /* Not the address itself: double buffering flips it every frame. */
+    if (proc == CUR_PROCESS_HANDLE)
+        note(screen, NOTE_WHERE, "picture is in VRAM (format %d, stride %d)", g->format, g->stride);
+    else
+        note(screen, NOTE_WHERE, "picture is in process %lu (format %d, stride %d)",
+             (unsigned long)owner_pid, g->format, g->stride);
 
     cur[screen].vaddr = addr;
     cur[screen].proc = proc;
@@ -138,15 +176,32 @@ int capture_begin(int screen, frame_geom *g)
     return 0;
 }
 
-static int wait_dma(Handle dma)
+/*
+ * Wait for a copy to finish. The DMA handle should be signalled when it's
+ * done, but in case it isn't (or can't be waited on), the state is polled as
+ * well. Like ChirunoMod, which works on real hardware, a state of 0 also
+ * counts as done once the copy has had time to finish: RAM-to-RAM copies
+ * report it.
+ */
+static int wait_dma(int screen, Handle dma)
 {
-    /* DMA objects are kernel synchronization objects (class token 0x59), so
-     * the handle is signalled when the transfer finishes. Note a timeout is
-     * reported as a non-negative result, hence the explicit == 0. */
-    if (svcWaitSynchronization(dma, DMA_TIMEOUT_NS) == 0)
+    Result wait = svcWaitSynchronization(dma, DMA_TIMEOUT_NS);
+    if (wait == 0)
         return 0;
-    DmaState st;
-    return R_SUCCEEDED(svcGetDmaState(&st, dma)) && st == DMASTATE_DONE ? 0 : -1;
+    bool waited = wait == WAIT_TIMED_OUT; /* the whole timeout went by */
+    DmaState st = DMASTATE_RUNNING;
+    Result rc = 0;
+    for (int i = 0; i < 40; i++) {
+        rc = svcGetDmaState(&st, dma);
+        if (R_FAILED(rc))
+            break;
+        if (st == DMASTATE_DONE || (st == DMASTATE_STARTING && (waited || i >= 2)))
+            return 0;
+        svcSleepThread(500 * 1000); /* 0.5 ms */
+    }
+    note(screen, NOTE_COPY, "copy did not finish (wait %08lX, state %d, %08lX)",
+         (unsigned long)wait, (int)st, (unsigned long)rc);
+    return -1;
 }
 
 int capture_lines(int screen, int first, int count, uint8_t *dst)
@@ -164,10 +219,12 @@ int capture_lines(int screen, int first, int count, uint8_t *dst)
     Result rc = svcStartInterProcessDma(&dma, CUR_PROCESS_HANDLE, (u32)dst, cur[screen].proc,
                                         src, size, &cfg);
     if (R_FAILED(rc)) {
+        note(screen, NOTE_COPY, "copy refused (%08lX, %lu bytes from %08lX)", (unsigned long)rc,
+             (unsigned long)size, (unsigned long)src);
         owner_pid = 0; /* the owner may have exited; look it up again */
         return -1;
     }
-    int ok = wait_dma(dma);
+    int ok = wait_dma(screen, dma);
     svcStopDma(dma);
     svcCloseHandle(dma);
     svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)dst, size);
