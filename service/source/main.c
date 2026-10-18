@@ -27,11 +27,12 @@
 #define O3DS_SOC  0x10000
 #define N3DS_SOC  0x40000
 
-/* The server thread (network + first worker) runs above the HOME Menu's and
- * most game threads, like ChirunoMod, and takes a break after every picture
- * (rest_pct) so they still get their share. Extra workers only use idle
- * time: the lowest priority there is. */
-#define SERVER_PRIORITY 0x20
+/* The server thread (network + first worker) runs at the usual priority of
+ * a main thread and takes a break after every picture (rest_pct). 0x20 was
+ * above system modules that launch apps, so opening one could stall; 0x3F
+ * (below everything) let games starve the stream. Extra workers only use
+ * idle time: the lowest priority there is. */
+#define SERVER_PRIORITY 0x30
 #define HELPER_PRIORITY 0x3F
 #define NOTIF_TERMINATE 0x100
 #define HID_PAD_REG     0x1EC46000 /* mapped via the exheader IO mappings */

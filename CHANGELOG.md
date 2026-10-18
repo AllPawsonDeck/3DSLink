@@ -6,6 +6,19 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.3.1 (2026-10-18)
+
+- **Fixed (hopefully):** opening the 3DSLink app could freeze the whole 3DS.
+  - The app checked on the streaming service with no time limit. If the
+    service was slow to answer, the app waited for a minute or more, and
+    while it waited even the HOME button didn't respond. Every check now
+    gives up after under a second.
+  - The regular checks happen in the background, so the app's screens and
+    the HOME button never wait on the network.
+  - In 0.3.0 the streaming service ran above some of the 3DS's own system
+    programs, including the ones that start apps. It now runs at a normal
+    priority and still takes a break after every picture.
+
 ## 0.3.0 (2026-10-18)
 
 - **Smoother on an Old 3DS.**

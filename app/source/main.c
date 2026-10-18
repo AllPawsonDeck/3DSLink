@@ -7,6 +7,8 @@
  */
 #include <3ds.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <malloc.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -26,6 +28,7 @@
 #define SERVICE_CIA   "romfs:/3DSLinkService.cia"
 #define PORT          8080
 #define SOC_SIZE      0x80000
+#define STATUS_TIMEOUT_MS 800 /* a status check never takes longer than this */
 
 static int state = ST_CHECKING;
 static char state_detail[64];
@@ -34,6 +37,9 @@ static u32 ip;
 static char address[32]; /* "192.168.1.47:8080" */
 static int viewers = -1;
 static char top_fps[8], bottom_fps[8], model[16];
+/* Guards what the background status check writes and the screens show:
+ * viewers, top_fps, bottom_fps, model. */
+static LightLock status_lock;
 
 /* Messages from this app, newest last (shown on the Logs tab). */
 #define APP_LOG_MAX 24
@@ -152,6 +158,7 @@ static bool konami_step(u32 down)
 
 static void draw_top(void)
 {
+    LightLock_Lock(&status_lock);
     ui_state ui = {
         .state = state,
         .install_pct = install_pct,
@@ -162,6 +169,7 @@ static void draw_top(void)
         .version = TDSL_VERSION,
     };
     ui_draw_top(&ui, canvas, consoleGetDefault()->font.gfx);
+    LightLock_Unlock(&status_lock);
     if (clawd_since) {
         u64 t = osGetTime() - clawd_since;
         int alpha = t < CLAWD_SHOW_MS ? 256 : (int)(256 * (CLAWD_SHOW_MS + CLAWD_FADE_MS - t) / CLAWD_FADE_MS);
@@ -296,12 +304,32 @@ static void refresh_ip(void)
     }
 }
 
-/* GET /api/status from the service. Returns body length or -1. */
+/* Wait until fd is ready for `events` or the deadline passes. */
+static bool wait_fd(int fd, short events, u64 deadline)
+{
+    u64 now = osGetTime();
+    if (now >= deadline)
+        return false;
+    struct pollfd p = { .fd = fd, .events = events };
+    return poll(&p, 1, (int)(deadline - now)) > 0 && (p.revents & events) &&
+           !(p.revents & (POLLERR | POLLNVAL));
+}
+
+/*
+ * GET /api/status from the service. Returns body length or -1.
+ *
+ * Every step has a deadline: a blocking connect to a busy service could wait
+ * for a minute or more, and while the app waits the HOME button doesn't
+ * respond either, so the whole 3DS looked frozen.
+ */
 static int fetch_status(char *body, int cap)
 {
     int s = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (s < 0)
         return -1;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+    u64 deadline = osGetTime() + STATUS_TIMEOUT_MS;
+
     struct sockaddr_in sa = { 0 };
     sa.sin_family = AF_INET;
     sa.sin_port = htons(PORT);
@@ -310,21 +338,17 @@ static int fetch_status(char *body, int cap)
      * can't reach our own service. */
     sa.sin_addr.s_addr = ip && !(which++ & 1) ? ip : htonl(INADDR_LOOPBACK);
 
-    static char buf[2048];
+    char buf[2048];
     int len = 0, result = -1;
     static const char req[] = "GET /api/status HTTP/1.0\r\nConnection: close\r\n\r\n";
-    if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
-        send(s, req, sizeof(req) - 1, 0) == (int)sizeof(req) - 1) {
-        for (;;) {
-            struct pollfd p = { .fd = s, .events = POLLIN };
-            if (poll(&p, 1, 1000) <= 0)
-                break;
+    int rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
+    bool connected = rc == 0 || ((errno == EINPROGRESS || errno == EALREADY) && wait_fd(s, POLLOUT, deadline));
+    if (connected && send(s, req, sizeof(req) - 1, 0) == (int)sizeof(req) - 1) {
+        while (len < (int)sizeof(buf) - 1 && wait_fd(s, POLLIN, deadline)) {
             int n = recv(s, buf + len, sizeof(buf) - 1 - len, 0);
             if (n <= 0)
                 break;
             len += n;
-            if (len >= (int)sizeof(buf) - 1)
-                break;
         }
         buf[len] = 0;
         char *b = strstr(buf, "\r\n\r\n");
@@ -354,6 +378,7 @@ static void copy_number(char *dst, int cap, const char *src)
     dst[n] = 0;
 }
 
+/* Ask the service how it's doing. Safe from any thread. */
 static bool update_status(char *version_out, int vcap)
 {
     char body[1024];
@@ -366,17 +391,43 @@ static bool update_status(char *version_out, int vcap)
             version_out[n++] = *p;
         version_out[n] = 0;
     }
-    viewers = (p = json_after(body, "streams")) ? atoi(p) : -1;
+    char tf[sizeof(top_fps)], bf[sizeof(bottom_fps)], m[sizeof(model)] = "";
+    int v = (p = json_after(body, "streams")) ? atoi(p) : -1;
     const char *top = strstr(body, "\"top\":{"), *bottom = strstr(body, "\"bottom\":{");
-    copy_number(top_fps, sizeof(top_fps), top ? json_after(top, "fps") : NULL);
-    copy_number(bottom_fps, sizeof(bottom_fps), bottom ? json_after(bottom, "fps") : NULL);
+    copy_number(tf, sizeof(tf), top ? json_after(top, "fps") : NULL);
+    copy_number(bf, sizeof(bf), bottom ? json_after(bottom, "fps") : NULL);
     if ((p = json_after(body, "model")) && *p == '"') {
         int n = 0;
-        for (p++; *p && *p != '"' && n < (int)sizeof(model) - 1; p++)
-            model[n++] = *p;
-        model[n] = 0;
+        for (p++; *p && *p != '"' && n < (int)sizeof(m) - 1; p++)
+            m[n++] = *p;
+        m[n] = 0;
     }
+    LightLock_Lock(&status_lock);
+    viewers = v;
+    memcpy(top_fps, tf, sizeof(tf));
+    memcpy(bottom_fps, bf, sizeof(bf));
+    memcpy(model, m, sizeof(m));
+    LightLock_Unlock(&status_lock);
     return true;
+}
+
+/*
+ * While the service runs, a background thread checks on it once a second,
+ * so the screens and the HOME button never wait on the network.
+ */
+static Thread poll_thread;
+static volatile bool poll_quit, poll_enabled;
+static volatile int poll_answered = -1; /* last check: 1 answered, 0 didn't, -1 none yet */
+
+static void poll_main(void *arg)
+{
+    (void)arg;
+    while (!poll_quit) {
+        if (poll_enabled)
+            poll_answered = update_status(NULL, 0) ? 1 : 0;
+        for (int i = 0; i < 10 && !poll_quit; i++)
+            svcSleepThread(100000000LL);
+    }
 }
 
 /* ---- service management -------------------------------------------------- */
@@ -392,6 +443,7 @@ static int installed_version(void)
 
 static void stop_service(void)
 {
+    poll_enabled = false;
     NS_TerminateProcessTID(SERVICE_TID, 3000000000ULL);
     svcSleepThread(300000000LL); /* let it release port 8080 */
 }
@@ -447,6 +499,7 @@ static Result install_service(void)
 static void ensure_service(bool force_reinstall)
 {
     char running_version[16] = "";
+    poll_enabled = false;
     state = ST_CHECKING;
     state_detail[0] = 0;
     draw();
@@ -490,7 +543,8 @@ static void ensure_service(bool force_reinstall)
             return;
         }
         /* Give it a few seconds to open its port. */
-        for (int i = 0; i < 40 && !running; i++) {
+        u64 give_up = osGetTime() + 6000;
+        while (!running && osGetTime() < give_up) {
             svcSleepThread(150000000LL);
             refresh_ip();
             running = update_status(NULL, 0);
@@ -499,6 +553,8 @@ static void ensure_service(bool force_reinstall)
         }
     }
 
+    if (running || !ip)
+        poll_enabled = true;
     if (running) {
         state = ST_RUNNING;
         state_detail[0] = 0;
@@ -543,6 +599,9 @@ int main(void)
     if (!soc_buf || R_FAILED(socInit(soc_buf, SOC_SIZE)))
         logf_("Network unavailable");
 
+    LightLock_Init(&status_lock);
+    poll_thread = threadCreate(poll_main, NULL, 0x8000, 0x31, -2, false);
+
     refresh_ip();
     ensure_service(force);
 
@@ -585,7 +644,9 @@ int main(void)
                 stop_service();
                 state = ST_STOPPED;
                 state_detail[0] = 0;
+                LightLock_Lock(&status_lock);
                 viewers = -1;
+                LightLock_Unlock(&status_lock);
                 logf_("Streaming turned off.");
             }
         }
@@ -618,8 +679,8 @@ int main(void)
             if (now - last_poll >= 1000) {
                 last_poll = now;
                 refresh_ip();
-                if (state == ST_RUNNING) {
-                    if (update_status(NULL, 0))
+                if (state == ST_RUNNING && poll_answered >= 0) {
+                    if (poll_answered)
                         state_detail[0] = 0;
                     else if (ip)
                         snprintf(state_detail, sizeof(state_detail), "Not answering right now");
@@ -632,6 +693,11 @@ int main(void)
         frame();
     }
 
+    poll_quit = true;
+    if (poll_thread) {
+        threadJoin(poll_thread, U64_MAX);
+        threadFree(poll_thread);
+    }
     socExit();
     free(soc_buf);
     nsExit();
