@@ -19,7 +19,6 @@
 #define VRAM_START 0x1F000000u
 #define VRAM_END   0x1F600000u
 #define DMA_TIMEOUT_NS (20 * 1000 * 1000LL)
-#define WAIT_TIMED_OUT 0x09401BFE /* svcWaitSynchronization's timeout result */
 
 static Handle gsp;
 static u32 own_pid;
@@ -35,7 +34,20 @@ static struct {
     u32 vaddr; /* first line of the framebuffer being copied */
     Handle proc;
     frame_geom geom;
+    Handle dma; /* copy in flight, if any */
+    uint8_t *dst;
+    u32 size;
 } cur[SCREEN_COUNT];
+
+/* Stop (if still running) and release the copy in flight. */
+static void capture_cancel(int screen)
+{
+    if (cur[screen].dma) {
+        svcStopDma(cur[screen].dma);
+        svcCloseHandle(cur[screen].dma);
+        cur[screen].dma = 0;
+    }
+}
 
 /*
  * The service log says what capture found and why it failed, but each kind
@@ -177,40 +189,27 @@ int capture_begin(int screen, frame_geom *g)
 }
 
 /*
- * Wait for a copy to finish. The DMA handle should be signalled when it's
- * done, but in case it isn't (or can't be waited on), the state is polled as
- * well. Like ChirunoMod, which works on real hardware, a state of 0 also
- * counts as done once the copy has had time to finish: RAM-to-RAM copies
- * report it.
+ * Copies run in the background while the previous lines are encoded. To know
+ * when one is finished, the last word of the destination is set to a marker
+ * first: the DMA writes the buffer in order, so once that word changed, the
+ * whole copy has landed. That doesn't depend on how the DMA handle or its
+ * state behave (ChirunoMod found the state reads 0, "starting", once a copy
+ * is done). If the framebuffer happens to end in the marker value itself,
+ * the copy is taken as done after DMA_TIMEOUT_NS, as before.
  */
-static int wait_dma(int screen, Handle dma)
-{
-    Result wait = svcWaitSynchronization(dma, DMA_TIMEOUT_NS);
-    if (wait == 0)
-        return 0;
-    bool waited = wait == WAIT_TIMED_OUT; /* the whole timeout went by */
-    DmaState st = DMASTATE_RUNNING;
-    Result rc = 0;
-    for (int i = 0; i < 40; i++) {
-        rc = svcGetDmaState(&st, dma);
-        if (R_FAILED(rc))
-            break;
-        if (st == DMASTATE_DONE || (st == DMASTATE_STARTING && (waited || i >= 2)))
-            return 0;
-        svcSleepThread(500 * 1000); /* 0.5 ms */
-    }
-    note(screen, NOTE_COPY, "copy did not finish (wait %08lX, state %d, %08lX)",
-         (unsigned long)wait, (int)st, (unsigned long)rc);
-    return -1;
-}
+#define COPY_MARKER 0x5A3C96E1u
 
-int capture_lines(int screen, int first, int count, uint8_t *dst)
+int capture_start(int screen, int first, int count, uint8_t *dst)
 {
     const frame_geom *g = &cur[screen].geom;
     u32 size = (u32)count * (u32)g->stride;
     u32 src = cur[screen].vaddr + (u32)first * (u32)g->stride;
 
-    /* No dirty cache lines may be written back over the DMA'd data. */
+    capture_cancel(screen);
+    vu32 *last = (vu32 *)(dst + size - 4);
+    *last = COPY_MARKER;
+    /* Write the marker out, and make sure no dirty cache line can later be
+     * written back over the copied data. */
     svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)dst, size);
 
     DmaConfig cfg;
@@ -224,15 +223,50 @@ int capture_lines(int screen, int first, int count, uint8_t *dst)
         owner_pid = 0; /* the owner may have exited; look it up again */
         return -1;
     }
-    int ok = wait_dma(screen, dma);
-    svcStopDma(dma);
-    svcCloseHandle(dma);
-    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)dst, size);
-    return ok;
+    cur[screen].dma = dma;
+    cur[screen].dst = dst;
+    cur[screen].size = size;
+    return 0;
+}
+
+static bool copy_landed(int screen)
+{
+    u32 end = (u32)cur[screen].dst + cur[screen].size;
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (end - 4) & ~31u, 32);
+    return *(vu32 *)(end - 4) != COPY_MARKER;
+}
+
+int capture_wait(int screen)
+{
+    Handle dma = cur[screen].dma;
+    if (!dma)
+        return -1;
+
+    bool done = false;
+    DmaState st = DMASTATE_RUNNING;
+    u64 deadline = svcGetSystemTick() + (u64)(SYSCLOCK_ARM11 / 1000000000.0 * DMA_TIMEOUT_NS);
+    while (!done) {
+        done = copy_landed(screen) || svcWaitSynchronization(dma, 0) == 0 ||
+               (R_SUCCEEDED(svcGetDmaState(&st, dma)) && st == DMASTATE_DONE);
+        if (done || svcGetSystemTick() > deadline)
+            break;
+        svcSleepThread(100 * 1000); /* 0.1 ms */
+    }
+    if (!done && R_SUCCEEDED(svcGetDmaState(&st, dma)) && st == DMASTATE_STARTING)
+        done = true; /* see above: the framebuffer ends in the marker value */
+
+    capture_cancel(screen);
+    if (!done) {
+        note(screen, NOTE_COPY, "copy did not finish (state %d)", (int)st);
+        return -1;
+    }
+    svcInvalidateProcessDataCache(CUR_PROCESS_HANDLE, (u32)cur[screen].dst, cur[screen].size);
+    return 0;
 }
 
 void capture_end(int screen)
 {
+    capture_cancel(screen);
     Handle h = cur[screen].proc;
     if (h && h != CUR_PROCESS_HANDLE)
         svcCloseHandle(h);

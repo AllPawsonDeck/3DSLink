@@ -51,11 +51,17 @@ static inline int pix_bytes(int format)
 /* Read the current framebuffer geometry for a screen. 0 on success. */
 int capture_begin(int screen, frame_geom *geom);
 
-/* Copy `count` framebuffer lines starting at `first` into dst, laid out with
- * geom->stride bytes per line. 0 on success. */
-int capture_lines(int screen, int first, int count, uint8_t *dst);
+/* Start copying `count` framebuffer lines starting at `first` into dst, laid
+ * out with geom->stride bytes per line, without waiting for the copy, so it
+ * can run while the previous lines are encoded. One copy per screen at a
+ * time. 0 on success. */
+int capture_start(int screen, int first, int count, uint8_t *dst);
 
-/* Called once per successful capture_begin(), after the last capture_lines(). */
+/* Wait for the copy capture_start() began. 0 once dst holds the lines. */
+int capture_wait(int screen);
+
+/* Called once per successful capture_begin(), after the last copy. Also
+ * cancels a copy that is still running. */
 void capture_end(int screen);
 
 /* Monotonic milliseconds. */

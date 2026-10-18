@@ -79,6 +79,37 @@ try {
   if (Buffer.byteLength(body) !== declared) fail("response body cut off");
   if (raw.ms > 1500) fail("server did not end the response promptly");
 
+  // Spare connections the browser opened but never used must not lock real
+  // requests out: fill every slot with idle sockets, then ask for the status.
+  const idle = [];
+  for (let i = 0; i < 8; i++) {
+    const sock = net.connect(port, "127.0.0.1");
+    sock.on("error", () => {});
+    idle.push(sock);
+  }
+  await sleep(300);
+  const busyCheck = await fetch(`http://127.0.0.1:${port}/api/status`);
+  console.log("status with idle sockets everywhere:", busyCheck.status);
+  if (busyCheck.status !== 200) fail("idle spare connections blocked a real request");
+  const st0 = await busyCheck.json();
+  if (typeof st0.busy !== "number" || typeof st0.screens.top.copy_ms !== "number") fail("timing stats missing");
+  idle.forEach((sock) => sock.destroy());
+
+  // Half detail: frames carry half the lines but must still fill the screen
+  // the right way up.
+  await page.keyboard.press("1");
+  await page.evaluate(() => fetch("/api/settings?half=1"));
+  await sleep(1500);
+  const halfSt = await getStatus();
+  const halfGot = await sample();
+  for (const s of ["top", "bottom"])
+    halfGot[s].forEach((c, i) => { if (!near(c, expect[s][i])) fail(`half detail ${s} corner ${i}: got ${c}, want ${expect[s][i]}`); });
+  console.log("half detail corners ok; frame bytes", halfSt.screens.top.frame_bytes, "half", halfSt.settings.half);
+  if (!halfSt.settings.half) fail("half detail setting not applied");
+  await page.evaluate(() => fetch("/api/settings?half=0"));
+  await page.keyboard.press("3");
+  await sleep(500);
+
   // Settings round-trip.
   await page.evaluate(() => fetch("/api/settings?quality=40&fps_top=12"));
   const st2 = await getStatus();

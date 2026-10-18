@@ -27,6 +27,7 @@
 #define O3DS_SOC  0x10000
 #define N3DS_SOC  0x40000
 
+#define SERVER_PRIORITY 0x3F /* the lowest there is */
 #define NOTIF_TERMINATE 0x100
 #define HID_PAD_REG     0x1EC46000 /* mapped via the exheader IO mappings */
 #define COMBO_HOLD_MS   2000
@@ -247,10 +248,14 @@ int main(void)
         /* New 3DS copies a whole frame per DMA; Old 3DS 32 lines at a time. */
         .strip_bytes = new3ds ? 400 * 960 : 32 * 960,
         .reserve_bytes = new3ds ? 96 * 1024 : 40 * 1024,
-        .max_clients = new3ds ? 8 : 5,
+        .max_clients = new3ds ? 8 : 6,
         .max_streams = new3ds ? 3 : 2,
         /* Old 3DS: socket buffers come out of the 64 KB SOC area, keep the default. */
         .stream_sndbuf = new3ds ? 32 * 1024 : 0,
+        /* Old 3DS: the service shares its CPU core with the HOME Menu, which
+         * stopped loading banners while we encoded flat out. ChirunoMod
+         * rests too. The New 3DS's third core is ours alone. */
+        .rest_pct = new3ds ? 0 : 15,
         .quality = new3ds ? 75 : 60,
         .fps_top = 30,
         .fps_bottom = new3ds ? 30 : 15,
@@ -259,12 +264,16 @@ int main(void)
     if (server_start(&cfg) != 0)
         core_log("server_start failed");
     else {
+        /* Lowest priority: anything else on the core (the HOME Menu, a game,
+         * other system modules) goes first, and we use the time left over. */
         Thread t = NULL;
         if (new3ds) {
             /* The New 3DS's third core is usually idle: encode there so
              * games never feel it. */
-            t = threadCreate(run_server, NULL, 0x4000, 0x30, 2, false);
+            t = threadCreate(run_server, NULL, 0x4000, SERVER_PRIORITY, 2, false);
         }
+        if (!t)
+            svcSetThreadPriority(CUR_THREAD_HANDLE, SERVER_PRIORITY);
         core_log("server running on core %d", t ? 2 : 1);
         if (t) {
             threadJoin(t, U64_MAX);

@@ -40,6 +40,7 @@ extern const unsigned int web_index_gz_len;
 #define BOOST_REFRESH_MS  10000  /* a game launch resets the New 3DS clock */
 #define STATIC_POLL_MS      100  /* how often an unchanged screen is re-checked */
 #define STATIC_AFTER         15  /* unchanged captures before slowing down */
+#define PUMP_EVERY_MS         5  /* network service interval while encoding */
 
 static const char *const screen_names[SCREEN_COUNT] = { "top", "bottom" };
 
@@ -89,6 +90,7 @@ typedef struct {
     int fps[SCREEN_COUNT];
     bool sharp;
     bool boost;
+    bool half;  /* encode every pair of lines as one: about twice as fast */
 } settings_t;
 
 static settings_t settings;
@@ -112,6 +114,8 @@ static void settings_set(const char *key, const char *val)
         settings.sharp = v != 0;
     else if (!strcmp(key, "boost"))
         settings.boost = v != 0;
+    else if (!strcmp(key, "half"))
+        settings.half = v != 0;
 }
 
 static void settings_load(void)
@@ -134,9 +138,9 @@ static void settings_save(void)
 {
     char buf[160];
     int n = snprintf(buf, sizeof(buf),
-                     "quality=%d\nfps_top=%d\nfps_bottom=%d\nsharp=%d\nboost=%d\n",
+                     "quality=%d\nfps_top=%d\nfps_bottom=%d\nsharp=%d\nboost=%d\nhalf=%d\n",
                      settings.quality, settings.fps[SCREEN_TOP],
-                     settings.fps[SCREEN_BOTTOM], settings.sharp, settings.boost);
+                     settings.fps[SCREEN_BOTTOM], settings.sharp, settings.boost, settings.half);
     plat_save_settings(buf, n);
 }
 
@@ -196,12 +200,14 @@ typedef struct {
     int quality_cut;      /* lowered after a frame overflowed its buffer */
     int good_run;
     int format;
+    bool half;
 
     /* stats, refreshed once per second */
     uint64_t window_start;
     uint32_t frames_window, bytes_window;
     uint32_t fps10, kbps;
-    uint32_t encode_ms;   /* smoothed */
+    uint32_t encode_ms;   /* smoothed: whole capture + encode */
+    uint32_t copy_ms;     /* smoothed: of that, waiting for framebuffer copies */
     uint32_t last_size;
     char error[64];
     bool ok_logged;       /* "sending pictures" logged since the last error */
@@ -244,6 +250,11 @@ static uint64_t listen_retry_at;
 static uint64_t started_at;
 
 static uint64_t total_frames;
+static uint64_t last_pump;
+static uint32_t busy_ms_window;  /* time spent capturing + encoding this second */
+static uint64_t busy_window_start;
+static uint32_t busy_pct;
+static uint32_t half_bytes;     /* each half of the strip buffer */
 
 static void set_nonblocking(int fd)
 {
@@ -337,10 +348,10 @@ static int settings_json(char *b, int cap)
 {
     return snprintf(b, (size_t)cap,
                     "{\"quality\":%d,\"fps_top\":%d,\"fps_bottom\":%d,"
-                    "\"sharp\":%s,\"boost\":%s,\"boost_supported\":%s}",
+                    "\"sharp\":%s,\"boost\":%s,\"boost_supported\":%s,\"half\":%s}",
                     settings.quality, settings.fps[SCREEN_TOP], settings.fps[SCREEN_BOTTOM],
                     settings.sharp ? "true" : "false", settings.boost ? "true" : "false",
-                    boost_supported ? "true" : "false");
+                    boost_supported ? "true" : "false", settings.half ? "true" : "false");
 }
 
 static const char *format_name(int f)
@@ -374,16 +385,17 @@ static int status_json(char *b, int cap)
         json_str(err, sizeof(err), st->error);
         n += snprintf(b + n, (size_t)(cap - n),
                       "%s\"%s\":{\"frames\":%u,\"fps\":%u.%u,\"kbps\":%u,\"frame_bytes\":%u,"
-                      "\"encode_ms\":%u,\"format\":\"%s\",\"static\":%s,"
+                      "\"encode_ms\":%u,\"copy_ms\":%u,\"format\":\"%s\",\"static\":%s,"
                       "\"quality\":%d,\"error\":\"%s\"}",
                       s ? "," : "", screen_names[s], (unsigned)st->seq, (unsigned)(st->fps10 / 10),
                       (unsigned)(st->fps10 % 10), (unsigned)st->kbps, (unsigned)st->last_size,
-                      (unsigned)st->encode_ms, format_name(st->format),
+                      (unsigned)st->encode_ms, (unsigned)st->copy_ms, format_name(st->format),
                       st->static_run >= STATIC_AFTER ? "true" : "false",
                       clampi(settings.quality - st->quality_cut, 10, 95), err);
     }
+    n += snprintf(b + n, (size_t)(cap - n), "},\"busy\":%u", (unsigned)busy_pct);
     n += snprintf(b + n, (size_t)(cap - n),
-                  "},\"memory\":{\"slots\":%d,\"slot_kb\":%u,\"strip_kb\":%u}}",
+                  ",\"memory\":{\"slots\":%d,\"slot_kb\":%u,\"strip_kb\":%u}}",
                   nslots, (unsigned)(slot_bytes / 1024), (unsigned)(strip_bytes / 1024));
     return n < cap ? n : cap - 1;
 }
@@ -487,7 +499,7 @@ static void handle_request(client_t *c)
         int n = status_json(c->buf, sizeof(c->buf));
         respond(c, 200, "application/json", NULL, c->buf, (uint32_t)n);
     } else if (!strcmp(target, "/api/settings")) {
-        static const char *const keys[] = { "quality", "fps_top", "fps_bottom", "sharp", "boost" };
+        static const char *const keys[] = { "quality", "fps_top", "fps_bottom", "sharp", "boost", "half" };
         bool changed = false;
         char v[16];
         for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -695,6 +707,26 @@ static void open_listener(uint64_t now)
     core_log("listening on http://%s:%d/", listen_addr ? inet_ntoa(a) : "0.0.0.0", cfg.port);
 }
 
+/* Shown if the 3DS has no room for another connection (it retries). */
+#define BUSY_PAGE "<!doctype html><meta http-equiv=\"refresh\" content=\"2\">" \
+                  "<title>3DSLink</title><p>The 3DS is busy. Trying again in a moment...</p>\n"
+
+/* When every connection slot is taken: one that is finished already, or else
+ * the oldest one the browser opened "just in case" and hasn't sent anything
+ * on yet (Chrome opens spares like that when a page loads). */
+static client_t *spare_client(void)
+{
+    client_t *best = NULL;
+    for (int i = 0; i < max_clients; i++) {
+        client_t *o = &clients[i];
+        if (o->state == C_DRAIN)
+            return o;
+        if (o->state == C_REQ && o->req_len == 0 && (!best || o->since < best->since))
+            best = o;
+    }
+    return best;
+}
+
 static void accept_clients(uint64_t now)
 {
     for (;;) {
@@ -702,11 +734,19 @@ static void accept_clients(uint64_t now)
         socklen_t sl = sizeof(sa);
         int fd = accept(listen_fd, (struct sockaddr *)&sa, &sl);
         if (fd < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR &&
-                errno != ECONNABORTED) {
-                core_log("accept failed (errno %d), restarting listener", errno);
-                open_listener(now);
+            int e = errno;
+            if (e == EAGAIN || e == EWOULDBLOCK || e == EINTR || e == ECONNABORTED)
+                return;
+            if (e == ENOMEM || e == ENOBUFS || e == EMFILE || e == ENFILE) {
+                /* Out of sockets for now: they free up as viewers hang up. */
+                static uint64_t told_at;
+                if (!told_at || now - told_at > 10000)
+                    core_log("too many connections at once (errno %d)", e);
+                told_at = now;
+                return;
             }
+            core_log("accept failed (errno %d), restarting listener", e);
+            open_listener(now);
             return;
         }
         set_nonblocking(fd);
@@ -718,16 +758,17 @@ static void accept_clients(uint64_t now)
         for (int i = 0; i < max_clients && !c; i++)
             if (clients[i].state == C_FREE)
                 c = &clients[i];
-        for (int i = 0; i < max_clients && !c; i++)
-            if (clients[i].state == C_DRAIN) /* done already; make room */
-                c = &clients[i];
-        if (c)
+        if (!c && (c = spare_client()))
             client_close(c);
         if (!c) {
-            static const char busy[] =
-                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n"
-                "Connection: close\r\n\r\n";
-            send(fd, busy, sizeof(busy) - 1, MSG_NOSIGNAL);
+            char busy[320];
+            int len = snprintf(busy, sizeof(busy),
+                               "HTTP/1.1 503 Service Unavailable\r\n"
+                               "Content-Type: text/html; charset=utf-8\r\n"
+                               "Content-Length: %u\r\nRetry-After: 2\r\n"
+                               "Connection: close\r\n\r\n%s",
+                               (unsigned)(sizeof(BUSY_PAGE) - 1), BUSY_PAGE);
+            send(fd, busy, (size_t)len, MSG_NOSIGNAL);
             close(fd);
             continue;
         }
@@ -779,6 +820,7 @@ static void net_pump(int timeout_ms)
     int map[1 + 16];
     int n = 0;
     uint64_t now = plat_now_ms();
+    last_pump = now;
 
     if (listen_fd < 0 && now >= listen_retry_at)
         open_listener(now);
@@ -884,18 +926,74 @@ static void screen_error(screen_t *st, const char *msg)
     }
 }
 
+/*
+ * Reads a framebuffer a strip of lines at a time through the two halves of
+ * the strip buffer: while one half is hashed and encoded, the copy of the
+ * next lines into the other half is already running.
+ */
+typedef struct {
+    int screen, lines, per_strip;
+    int first, count; /* lines being copied right now (count 0: none) */
+    int which;        /* half they are going into */
+    uint32_t wait_ms; /* time spent waiting for copies */
+} strip_reader;
+
+static uint8_t *strip_half(int which)
+{
+    return strip + (which ? half_bytes : 0);
+}
+
+static int reader_start(strip_reader *r, int s, const frame_geom *g, int per_strip)
+{
+    r->screen = s;
+    r->lines = g->lines;
+    r->per_strip = per_strip;
+    r->first = 0;
+    r->count = per_strip < g->lines ? per_strip : g->lines;
+    r->which = 0;
+    r->wait_ms = 0;
+    return capture_start(s, 0, r->count, strip_half(0));
+}
+
+/* Waits for the next strip and starts copying the one after it. Returns how
+ * many lines *out holds: 0 once the frame is done, -1 if a copy failed. */
+static int reader_next(strip_reader *r, const uint8_t **out)
+{
+    if (r->count == 0)
+        return 0;
+    uint64_t t = plat_now_ms();
+    int rc = capture_wait(r->screen);
+    r->wait_ms += (uint32_t)(plat_now_ms() - t);
+    if (rc != 0)
+        return -1;
+
+    int n = r->count, done = r->which, next = r->first + n;
+    r->count = 0;
+    if (next < r->lines) {
+        int m = r->lines - next < r->per_strip ? r->lines - next : r->per_strip;
+        if (capture_start(r->screen, next, m, strip_half(!done)) != 0)
+            return -1;
+        r->first = next;
+        r->count = m;
+        r->which = !done;
+    }
+    *out = strip_half(done);
+    return n;
+}
+
 /* Hash the framebuffer without encoding it (cheap change detection). */
 static int probe_hash(int s, const frame_geom *g, int per_strip, uint32_t *out)
 {
     uint32_t h = 2166136261u;
-    for (int first = 0; first < g->lines; first += per_strip) {
-        int n = g->lines - first < per_strip ? g->lines - first : per_strip;
-        if (capture_lines(s, first, n, strip) != 0)
-            return -1;
-        h = hash_lines(h, strip, n, g);
-    }
+    strip_reader r;
+    const uint8_t *lines;
+    int n;
+    if (reader_start(&r, s, g, per_strip) != 0)
+        return -1;
+    while ((n = reader_next(&r, &lines)) > 0)
+        h = hash_lines(h, lines, n, g);
     *out = h;
-    return 0;
+    return n;
 }
 
 static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t t0);
@@ -920,16 +1018,20 @@ static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t
         screen_error(st, "unsupported framebuffer layout");
         return;
     }
-    int per_strip = (int)(strip_bytes / (uint32_t)g.stride);
+    bool half = settings.half;
+    int per_strip = (int)(half_bytes / (uint32_t)g.stride);
     if (per_strip > g.lines)
         per_strip = g.lines;
+    if (half)
+        per_strip &= ~1; /* half detail encodes lines in pairs */
     if (per_strip < 1) {
         screen_error(st, "capture buffer too small");
         return;
     }
 
-    bool changed_format = g.format != st->format;
+    bool changed_format = g.format != st->format || half != st->half;
     st->format = g.format;
+    st->half = half;
     /* Unchanged frames are only skipped while viewers can still be given the
      * cached copy; once that buffer was recycled we must encode again. */
     bool cached = latest[s] >= 0;
@@ -953,18 +1055,30 @@ static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t
     pool_take(slot);
 
     int quality = clampi(settings.quality - st->quality_cut, 10, 95);
-    int rc = jpeg_enc_begin(enc, &g, quality, settings.sharp, slots[slot].data, slot_bytes);
+    int rc = jpeg_enc_begin(enc, &g, quality, settings.sharp, half, slots[slot].data, slot_bytes);
     uint32_t h = 2166136261u;
-    for (int first = 0; rc == ENC_OK && first < g.lines; first += per_strip) {
-        int n = g.lines - first < per_strip ? g.lines - first : per_strip;
-        if (capture_lines(s, first, n, strip) != 0) {
+    strip_reader r;
+    if (rc == ENC_OK && reader_start(&r, s, &g, per_strip) != 0) {
+        jpeg_enc_abort(enc);
+        screen_error(st, "framebuffer copy failed");
+        return;
+    }
+    while (rc == ENC_OK) {
+        const uint8_t *lines;
+        int n = reader_next(&r, &lines);
+        if (n == 0)
+            break;
+        if (n < 0) {
             jpeg_enc_abort(enc);
             screen_error(st, "framebuffer copy failed");
             return;
         }
-        h = hash_lines(h, strip, n, &g);
-        rc = jpeg_enc_lines(enc, strip, n);
-        net_pump(0);
+        h = hash_lines(h, lines, n, &g);
+        rc = jpeg_enc_lines(enc, lines, n);
+        /* Keep viewers fed, but don't ask the network module after every
+         * strip: each check is a round trip to another process. */
+        if (plat_now_ms() - last_pump >= PUMP_EVERY_MS)
+            net_pump(0);
         if (plat_should_exit()) {
             jpeg_enc_abort(enc);
             return;
@@ -989,6 +1103,7 @@ static void produce_frame(int s, unsigned wanted, const frame_geom *gp, uint64_t
 
     uint32_t ms = (uint32_t)(plat_now_ms() - t0);
     st->encode_ms = st->encode_ms ? (st->encode_ms * 3 + ms) / 4 : ms;
+    st->copy_ms = (st->copy_ms * 3 + r.wait_ms) / 4;
 
     if (st->have_hash && h == st->hash && !changed_format && cached) {
         st->static_run++;
@@ -1076,6 +1191,12 @@ static int pick_screen(uint64_t now, int *wait_ms, unsigned wanted)
 
 static void update_stats(uint64_t now)
 {
+    if (now - busy_window_start >= 1000) {
+        uint32_t pct = (uint32_t)(busy_ms_window * 100ull / (now - busy_window_start));
+        busy_pct = pct > 100 ? 100 : pct;
+        busy_ms_window = 0;
+        busy_window_start = now;
+    }
     for (int s = 0; s < SCREEN_COUNT; s++) {
         screen_t *st = &screens[s];
         uint64_t span = now - st->window_start;
@@ -1108,8 +1229,12 @@ int server_start(const server_config *config)
 
     clients = calloc((size_t)max_clients, sizeof(client_t));
     enc = jpeg_enc_create();
-    strip_bytes = cfg.strip_bytes;
-    strip = malloc(strip_bytes);
+    /* Two halves, each a whole number of cache lines (the DMA writes them
+     * while the CPU reads the other half). */
+    strip_bytes = cfg.strip_bytes & ~127u;
+    half_bytes = strip_bytes / 2;
+    uint8_t *strip_mem = malloc(strip_bytes + 64);
+    strip = strip_mem ? (uint8_t *)(((uintptr_t)strip_mem + 63) & ~(uintptr_t)63) : NULL;
     if (!clients || !enc || !strip) {
         core_log("out of memory during startup");
         return -1;
@@ -1148,6 +1273,7 @@ int server_start(const server_config *config)
         screens[s].format = -1;
         screens[s].window_start = started_at;
     }
+    busy_window_start = started_at;
 
     core_log("3DSLink %s on %s: %d x %u KB frame buffers, %u KB strips", cfg.version,
              cfg.model, nslots, (unsigned)(slot_bytes / 1024), (unsigned)(strip_bytes / 1024));
@@ -1173,6 +1299,13 @@ void server_run(void)
             screens[s].last_start = now;
             screens[s].pass += (uint64_t)interval_ms(s);
             produce(s, wanted);
+            uint32_t took = (uint32_t)(plat_now_ms() - now);
+            busy_ms_window += took;
+            /* Give the rest of the system a turn (server_config.rest_pct). */
+            if (cfg.rest_pct > 0) {
+                int rest = (int)(took * (uint32_t)cfg.rest_pct / 100);
+                plat_sleep_ms(rest < 1 ? 1 : rest);
+            }
             net_pump(0);
         } else {
             net_pump(wait < 1 ? 1 : wait);

@@ -135,10 +135,17 @@ int capture_begin(int screen, frame_geom *g)
     return 0;
 }
 
-int capture_lines(int screen, int first, int count, uint8_t *dst)
+/* The PC "copy" happens right away; waiting for it is a no-op. */
+int capture_start(int screen, int first, int count, uint8_t *dst)
 {
     int stride = 240 * pix_bytes(formats[screen]);
     memcpy(dst, fb[screen] + first * stride, (size_t)(count * stride));
+    return 0;
+}
+
+int capture_wait(int screen)
+{
+    (void)screen;
     return 0;
 }
 
@@ -184,9 +191,10 @@ int main(int argc, char **argv)
         .min_slot_bytes = 24 * 1024,
         .strip_bytes = 32 * 960,
         .reserve_bytes = 48 * 1024,
-        .max_clients = 6,
-        .max_streams = 3,
+        .max_clients = 6,  /* same limits as an Old 3DS */
+        .max_streams = 2,
         .stream_sndbuf = 32 * 1024,
+        .rest_pct = 15,
         .quality = 70,
         .fps_top = 30,
         .fps_bottom = 20,

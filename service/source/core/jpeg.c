@@ -4,7 +4,8 @@
  * Lines arrive a strip at a time straight from the framebuffer copy, so we
  * never hold a whole decoded frame in memory. 24/32-bit framebuffers are fed
  * to libjpeg-turbo untouched using its extended colour spaces; 16-bit formats
- * are expanded one line at a time.
+ * are expanded one line at a time. In half-detail mode each pair of lines is
+ * averaged into one first.
  */
 #include <setjmp.h>
 #include <stdio.h>
@@ -27,8 +28,11 @@ struct jpeg_enc {
     uint32_t cap;
     bool overflow;
     bool active;
+    bool half;
     frame_geom g;
     uint8_t row[MAX_LINE_PIXELS * 3];
+    /* half detail: the two lines of a pair (word-sized for fast averaging) */
+    uint32_t pair[2][MAX_LINE_PIXELS];
 };
 
 static void on_error_exit(j_common_ptr c)
@@ -108,13 +112,14 @@ static int fail(jpeg_enc *e)
     return e->overflow ? ENC_OVERFLOW : ENC_ERROR;
 }
 
-int jpeg_enc_begin(jpeg_enc *e, const frame_geom *g, int quality, bool sharp,
+int jpeg_enc_begin(jpeg_enc *e, const frame_geom *g, int quality, bool sharp, bool half,
                    uint8_t *out, uint32_t cap)
 {
-    if (g->width <= 0 || g->width > MAX_LINE_PIXELS || g->lines <= 0)
+    if (g->width <= 0 || g->width > MAX_LINE_PIXELS || g->lines <= 0 || (half && g->lines & 1))
         return ENC_ERROR;
 
     e->g = *g;
+    e->half = half;
     e->out = out;
     e->cap = cap;
     e->overflow = false;
@@ -124,7 +129,7 @@ int jpeg_enc_begin(jpeg_enc *e, const frame_geom *g, int quality, bool sharp,
         return fail(e);
 
     c->image_width = (JDIMENSION)g->width;
-    c->image_height = (JDIMENSION)g->lines;
+    c->image_height = (JDIMENSION)(half ? g->lines / 2 : g->lines);
     switch (g->format) {
     case PIX_RGBA8:
         /* GSP RGBA8 is stored A,B,G,R in memory. */
@@ -189,11 +194,44 @@ static void expand_line(uint8_t *dst, const uint8_t *src, int width, int format)
     }
 }
 
+/* Byte-wise average of two buffers, four bytes at a time; into a. */
+static void average_into(uint32_t *a, const uint32_t *b, int words)
+{
+    for (int i = 0; i < words; i++)
+        a[i] = (a[i] & b[i]) + (((a[i] ^ b[i]) & 0xFEFEFEFEu) >> 1);
+}
+
+/* Half detail: one averaged line per pair of source lines. */
+static int write_pairs(jpeg_enc *e, const uint8_t *src, int count)
+{
+    struct jpeg_compress_struct *c = &e->cinfo;
+    const int stride = e->g.stride;
+    const bool wide = e->g.format == PIX_RGBA8 || e->g.format == PIX_BGR8;
+    /* bytes per line as the encoder sees it, rounded up to whole words */
+    const int bytes = e->g.width * (wide ? pix_bytes(e->g.format) : 3);
+    const int words = (bytes + 3) / 4;
+    JSAMPROW row = (JSAMPROW)e->pair[0];
+    for (; count >= 2; count -= 2, src += 2 * stride) {
+        for (int k = 0; k < 2; k++) {
+            if (wide)
+                memcpy(e->pair[k], src + k * stride, (size_t)bytes);
+            else
+                expand_line((uint8_t *)e->pair[k], src + k * stride, e->g.width, e->g.format);
+        }
+        average_into(e->pair[0], e->pair[1], words);
+        if (jpeg_write_scanlines(c, &row, 1) != 1)
+            return fail(e);
+    }
+    return ENC_OK;
+}
+
 /* Runs under the setjmp armed by jpeg_enc_lines(). */
 static int write_lines(jpeg_enc *e, const uint8_t *src, int count)
 {
     struct jpeg_compress_struct *c = &e->cinfo;
     const int stride = e->g.stride;
+    if (e->half)
+        return write_pairs(e, src, count);
     if (e->g.format == PIX_RGBA8 || e->g.format == PIX_BGR8) {
         JSAMPROW rows[16];
         while (count > 0) {

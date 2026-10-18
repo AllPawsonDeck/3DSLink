@@ -6,6 +6,27 @@ top. Each GitHub release shows its section from this file.
 To ship a new version: add a `## x.y.z` section here, put the same number in
 `VERSION`, and push to `main`.
 
+## 0.2.11 (2026-10-18)
+
+- **Fixed (hopefully):** app banners stopped showing on the HOME Menu while
+  streaming. On an Old 3DS the streaming service shares a processor core with
+  the HOME Menu, and it was using all of it. It now lets everything else on
+  that core go first and takes a short break after every frame, like the
+  proven ChirunoMod module does.
+- **Fixed (hopefully):** "Pop out" on a real 3DS. The main tab now hands its
+  stream over the moment you click Pop out (and stops checking the 3DS's
+  status), so the 3DS has room for the new window. The 3DS also closes
+  spare connections Chrome opens but never uses, instead of turning new ones
+  away. If it ever is too busy, the window now says so and retries by
+  itself instead of staying blank.
+- **Faster:** the 3DS copies the next part of the screen while it compresses
+  the current one, and checks the network less often while compressing.
+- **New setting: "Faster, less detail".** In Settings on the viewer page.
+  It sends each screen at half its width, which takes about half the work,
+  so the frame rate roughly doubles. Good for games on an Old 3DS.
+- **Stats show where the time goes.** Turn on "Show stats" in Settings to
+  see how long each frame takes and how busy the 3DS is.
+
 ## 0.2.10 (2026-10-18)
 
 - **Fixed (hopefully):** the viewer page loaded but stayed completely blank.

@@ -143,6 +143,7 @@ a { color: var(--accent); }
       <input type="range" id="fpsBottom" min="1" max="60">
       <p class="hint">Only screens shown in the current layout are sent, so “Top” gives the top screen the whole 3DS.</p>
     </div>
+    <label class="check"><input type="checkbox" id="half"> Faster, less detail (about twice the frame rate)</label>
     <label class="check"><input type="checkbox" id="sharp"> Sharp colour (better small text, more data)</label>
     <label class="check" id="boostRow" hidden><input type="checkbox" id="boost"> New 3DS speed boost (804 MHz)</label>
 
@@ -210,10 +211,11 @@ for (const name of ["top", "bottom"]) {
 
 function draw(s, bmp) {
   const ctx = s.ctx;
-  if (bmp.width === s.canvas.height && bmp.height === s.canvas.width) {
-    // Frames arrive in the 3DS's native sideways orientation; turn them upright.
+  if (bmp.width === s.canvas.height) {
+    // Frames arrive in the 3DS's native sideways orientation; turn them
+    // upright (and stretch them back out in half-detail mode).
     ctx.setTransform(0, -1, 1, 0, 0, s.canvas.height);
-    ctx.drawImage(bmp, 0, 0);
+    ctx.drawImage(bmp, 0, 0, s.canvas.height, s.canvas.width);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   } else {
     ctx.drawImage(bmp, 0, 0, s.canvas.width, s.canvas.height);
@@ -456,9 +458,10 @@ function updateStats() {
     if (!(s.name in LAYOUTS[prefs.layout].items)) continue;
     let line = `${s.name.padEnd(6)} ${s.fps.toFixed(1).padStart(4)} fps  ${(s.kbps / 1000).toFixed(2)} Mbit/s`;
     const r = remote && remote.screens && remote.screens[s.name];
-    if (r) line += `  encode ${r.encode_ms} ms  q${r.quality}  ${r.format}${r.static ? "  (still)" : ""}`;
+    if (r) line += `  ${r.encode_ms} ms/frame (copy ${r.copy_ms})  q${r.quality}  ${r.format}${r.static ? "  (still)" : ""}`;
     lines.push(line);
   }
+  if (remote && remote.busy !== undefined) lines.push(`3DS busy ${remote.busy}%`);
   $("stats").textContent = lines.join("\n");
 }
 
@@ -488,12 +491,13 @@ function showRemoteSettings(st) {
     $(out).textContent = fmt(st[key]);
   }
   $("sharp").checked = !!st.sharp;
+  $("half").checked = !!st.half;
   $("boost").checked = !!st.boost;
   $("boostRow").hidden = !st.boost_supported;
 }
 
 async function pollStatus() {
-  if (isPopout || document.hidden) return;
+  if (isPopout || popoutActive || document.hidden) return;
   try {
     const r = await fetch(base + "/api/status", { cache: "no-store" });
     remote = await r.json();
@@ -528,13 +532,13 @@ function pushSettings() {
   pushTimer = setTimeout(async () => {
     const q = new URLSearchParams({
       quality: $("quality").value, fps_top: $("fpsTop").value, fps_bottom: $("fpsBottom").value,
-      sharp: $("sharp").checked ? 1 : 0, boost: $("boost").checked ? 1 : 0,
+      sharp: $("sharp").checked ? 1 : 0, boost: $("boost").checked ? 1 : 0, half: $("half").checked ? 1 : 0,
     });
     try { await fetch(base + "/api/settings?" + q, { cache: "no-store" }); } catch (e) {}
   }, 250);
 }
 for (const id of ["quality", "fpsTop", "fpsBottom"]) $(id).addEventListener("input", pushSettings);
-for (const id of ["sharp", "boost"]) $(id).addEventListener("change", pushSettings);
+for (const id of ["sharp", "boost", "half"]) $(id).addEventListener("change", pushSettings);
 
 /* ---------- pop-out window ---------- */
 const channel = "BroadcastChannel" in window ? new BroadcastChannel("3dslink") : null;
@@ -580,8 +584,14 @@ function openPopout() {
   s = s >= 1 ? Math.floor(s * 2) / 2 : s;
   const w = Math.round(L.w * s), h = Math.round(L.h * s);
   const url = "?popout=1&layout=" + prefs.layout + (params.get("host") ? "&host=" + encodeURIComponent(params.get("host")) : "");
+  // Hand the 3DS over right away: it can only serve so many connections,
+  // and the pop-out needs a few to load. If the pop-out never says hello,
+  // this tab takes the stream back after a few seconds.
+  lastPing = performance.now() + 5000;
+  checkPopout();
   popupRef = window.open(url, "3dslink-popout", `popup=yes,width=${w},height=${h}`);
   if (popupRef) popupRef.focus();
+  else { lastPing = 0; checkPopout(); }
 }
 
 /* ---------- controls ---------- */

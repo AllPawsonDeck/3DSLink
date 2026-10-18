@@ -18,6 +18,9 @@ typedef struct {
     /* Socket send buffer for streams (0 = system default). Small buffers keep
      * a slow viewer from falling behind on stale queued frames. */
     int stream_sndbuf;
+    /* After each frame, pause for this share of the time it took (percent),
+     * so a CPU core shared with the HOME Menu and games stays responsive. */
+    int rest_pct;
 
     /* Defaults used until the viewer changes them. */
     int quality;
