@@ -138,8 +138,10 @@ make test                                    # end-to-end browser test
 ```
 
 GitHub Actions builds every push and runs the browser test. To publish a
-release (which the QR code above always points to), bump `VERSION` and push to
-`main`.
+release (which the QR code above always points to), add a section for the new
+version to [CHANGELOG.md](CHANGELOG.md), put the same number in `VERSION`, and
+push to `main`. The release notes are built from the changelog, and the build
+fails if the version has no changelog entry.
 
 Other tools: `make art` redraws the icon and the flat banner picture
 (`tools/make_art.py`); `tools/make_banner3d.py --pycgfx <path>` rebuilds the

@@ -33,6 +33,9 @@ jobs:
           unzip -oj /tmp/bannertool.zip linux-x86_64/bannertool -d /usr/local/bin
           chmod +x /usr/local/bin/bannertool
 
+      - name: Check the changelog has an entry for VERSION
+        run: python3 tools/release_notes.py > /dev/null
+
       - name: Build
         run: make
 
@@ -86,5 +89,6 @@ jobs:
             echo "$tag is already released; bump VERSION to publish a new one."
             exit 0
           fi
+          python3 tools/release_notes.py > notes.md
           gh release create "$tag" dist/app/3DSLink.cia dist/service/3DSLinkService.cia \
-            --title "3DSLink $tag" --notes-file docs/release-notes.md --latest
+            --title "3DSLink $tag" --notes-file notes.md --latest
