@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install makerom and bannertool
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3 unzip curl ca-certificates
+          curl -fsSL -o /tmp/makerom.zip \
+            https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-ubuntu_x86_64.zip
+          unzip -o /tmp/makerom.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/makerom
+          curl -fsSL -o /tmp/bannertool.zip \
+            https://github.com/Epicpkmn11/bannertool/releases/download/v1.2.2/bannertool.zip
+          unzip -oj /tmp/bannertool.zip linux-x86_64/bannertool -d /usr/local/bin
+          chmod +x /usr/local/bin/bannertool
+
+      - name: Build
+        run: make
+
+      - name: Check title IDs
+        run: |
+          python3 tools/cia_info.py build/app/3DSLink.cia --expect-tid 000400000CFAAF00
+          python3 tools/cia_info.py build/service/3DSLinkService.cia --expect-tid 000401300CF10902
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 3DSLink
+          path: |
+            build/app/3DSLink.cia
+            build/service/3DSLinkService.cia
+          if-no-files-found: error
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libjpeg-turbo8-dev
+          npm install --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+      - name: Browser end-to-end test (PC harness)
+        run: make test
+
+  release:
+    # Publishes once per VERSION; bump VERSION to ship a new release. The
+    # README's QR code always points at the newest release.
+    needs: [build, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: 3DSLink
+          path: dist
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v$(cat VERSION)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released; bump VERSION to publish a new one."
+            exit 0
+          fi
+          gh release create "$tag" dist/app/3DSLink.cia dist/service/3DSLinkService.cia \
+            --title "3DSLink $tag" --notes-file docs/release-notes.md --latest

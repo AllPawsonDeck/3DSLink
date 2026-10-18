@@ -1,50 +1,660 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>3DSLink</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='26' height='15' rx='2' fill='%23ff9a1f'/%3E%3Crect x='7' y='20' width='18' height='10' rx='2' fill='%23ff9a1f' opacity='.75'/%3E%3C/svg%3E">
 <style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;background:#111;color:#fff;font-family:Arial,sans-serif}body{display:flex;align-items:center;justify-content:center}.app{width:min(920px,96vw);padding:18px}.toolbar,.popcontrols{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.toolbar{margin-bottom:14px}.popcontrols{margin-top:14px}button{border:0;border-radius:9px;padding:9px 13px;background:#2b2b2b;color:#fff;cursor:pointer}button:hover{background:#3b3b3b}.shell{margin:auto;width:min(760px,94vw)}.half{background:#b21f2d;border-radius:24px;padding:24px;box-shadow:0 10px 30px #0008}.hinge{height:18px;width:78%;margin:auto;background:#6f111b;border-radius:8px}.screen{display:block;background:#000;margin:auto}.top{width:100%;aspect-ratio:400/240}.bottom{width:78%;aspect-ratio:320/240}.clean .half{background:transparent;padding:8px;box-shadow:none}.clean .hinge{display:none}.clean .bottom{width:80%}.toponly .bottomhalf,.toponly .hinge{display:none}.toponly .tophalf{background:transparent;padding:0;box-shadow:none}.toponly .top{width:100%;max-height:94vh}.status{text-align:center;margin-top:10px;color:#aaa;font-size:13px}
-</style></head>
-<body><div class="app">
-<div class="toolbar"><button onclick="setMode('shell')">3DS</button><button onclick="setMode('clean')">Screens</button><button onclick="setMode('toponly')">Top only</button></div>
-<div id="shell" class="shell"><div class="half tophalf"><canvas id="top" class="screen top" width="400" height="240"></canvas></div><div class="hinge"></div><div class="half bottomhalf"><canvas id="bottom" class="screen bottom" width="320" height="240"></canvas></div></div>
-<div class="popcontrols"><button onclick="pop('top')">Pop out top</button><button onclick="pop('bottom')">Pop out bottom</button><button onclick="pop('both')">Pop out both</button></div>
-<div id="status" class="status">Connecting to 3DS…</div></div>
+:root {
+  --bg: #0b0d10;
+  --panel: #14181e;
+  --panel-2: #1b2028;
+  --line: #2a313b;
+  --text: #e9edf2;
+  --muted: #98a2b0;
+  --accent: #ff9a1f;
+  --accent-ink: #1d1206;
+  --ok: #3ccf8e;
+  --warn: #f5b941;
+  --bad: #f06464;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+body { display: flex; flex-direction: column; overflow: hidden;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, input { font: inherit; color: inherit; }
+
+header { display: flex; align-items: center; gap: 10px; padding: 8px 12px; flex-wrap: wrap;
+  background: var(--panel); border-bottom: 1px solid var(--line); }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-right: 4px; }
+.brand svg { width: 22px; height: 22px; }
+.status { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted); font-size: 13px;
+  white-space: nowrap; }
+.status i { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+.status.live i { background: var(--ok); }
+.status.off i { background: var(--bad); }
+.spacer { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel-2); }
+.seg button { border: 0; background: none; padding: 6px 11px; color: var(--muted); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.btn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+.btn:hover, .seg button:hover:not([aria-pressed="true"]) { background: #242a34; color: var(--text); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+#stage { flex: 1; position: relative; min-height: 0; overflow: hidden; }
+#box { position: absolute; }
+#box canvas { position: absolute; display: block; background: #000; image-rendering: pixelated; }
+body.smooth #box canvas { image-rendering: auto; }
+
+#notice { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 16px; }
+#notice.show { display: flex; }
+#notice .card { background: rgba(20, 24, 30, .92); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; max-width: 420px; }
+#notice h2 { margin: 0 0 6px; font-size: 17px; }
+#notice p { margin: 0 0 12px; color: var(--muted); }
+#notice .row { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+
+#stats { position: absolute; left: 10px; bottom: 10px; display: none; padding: 6px 9px; border-radius: 8px;
+  background: rgba(0, 0, 0, .65); color: #dfe6ee; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre; pointer-events: none; }
+body.show-stats #stats { display: block; }
+
+#showControls { position: absolute; top: 10px; right: 10px; display: none; opacity: 0; transition: opacity .2s; }
+body.clean:not(.popout) #showControls { display: block; }
+body.clean.mouse #showControls { opacity: 1; }
+body.clean header { display: none; }
+body.clean, body.clean #stage { background: #000; }
+
+aside { position: absolute; top: 0; right: 0; bottom: 0; width: min(330px, 100%); overflow-y: auto; display: none;
+  background: var(--panel); border-left: 1px solid var(--line); padding: 14px 16px 24px; z-index: 5; }
+aside.open { display: block; }
+aside h3 { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+aside h3:first-of-type { margin-top: 4px; }
+.field { margin: 10px 0; }
+.field label { display: flex; justify-content: space-between; gap: 10px; }
+.field output { color: var(--muted); font-variant-numeric: tabular-nums; }
+.field input[type=range] { width: 100%; accent-color: var(--accent); }
+.check { display: flex; align-items: center; gap: 8px; margin: 9px 0; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; }
+.hint { color: var(--muted); font-size: 12.5px; margin: 2px 0 0; }
+dl.info { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+dl.info dt { color: var(--muted); }
+dl.info dd { margin: 0; overflow-wrap: anywhere; }
+kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-size: 12px; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 5px 10px; font-size: 13px; color: var(--muted); }
+.close { float: right; }
+a { color: var(--accent); }
+
+@media (max-width: 640px) {
+  header { gap: 6px; padding: 6px 8px; }
+  .brand span, .wide-only { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="15" rx="2" fill="#ff9a1f"/><rect x="7" y="20" width="18" height="10" rx="2" fill="#ff9a1f" opacity=".75"/></svg>
+    <span>3DSLink</span>
+  </div>
+  <div class="status" id="status" role="status"><i></i><span id="statusText">Connecting…</span></div>
+  <div class="spacer"></div>
+  <div class="seg" role="group" aria-label="Layout" id="layouts">
+    <button data-layout="stack" title="Like a 3DS (1)">3DS</button>
+    <button data-layout="side" title="Side by side (2)">Side by side</button>
+    <button data-layout="top" title="Top screen only (3)">Top</button>
+    <button data-layout="bottom" title="Bottom screen only (4)">Bottom</button>
+  </div>
+  <button class="btn" id="popoutBtn" title="Open the screens in their own window, ready for Discord (P)">Pop out</button>
+  <button class="btn wide-only" id="fullBtn" title="Fullscreen (F)">Fullscreen</button>
+  <button class="btn wide-only" id="cleanBtn" title="Hide these controls (H)">Hide controls</button>
+  <button class="btn" id="settingsBtn" aria-expanded="false" aria-controls="settings">Settings</button>
+</header>
+
+<main id="stage">
+  <div id="box">
+    <canvas id="top" width="400" height="240" aria-label="Top screen"></canvas>
+    <canvas id="bottom" width="320" height="240" aria-label="Bottom screen"></canvas>
+  </div>
+  <div id="notice"><div class="card">
+    <h2 id="noticeTitle">Connecting to your 3DS…</h2>
+    <p id="noticeText">Keep the 3DS awake and on the same Wi-Fi as this computer.</p>
+    <div class="row" id="noticeActions"></div>
+  </div></div>
+  <div id="stats"></div>
+  <button class="btn" id="showControls">Show controls</button>
+
+  <aside id="settings" aria-label="Settings">
+    <button class="btn close" id="closeSettings">Close</button>
+    <h3>3DS stream</h3>
+    <div class="field">
+      <label for="quality">Image quality <output id="qualityOut"></output></label>
+      <input type="range" id="quality" min="10" max="95" step="5">
+      <p class="hint">Lower quality sends frames faster over weak Wi-Fi.</p>
+    </div>
+    <div class="field">
+      <label for="fpsTop">Top screen frame rate cap <output id="fpsTopOut"></output></label>
+      <input type="range" id="fpsTop" min="1" max="60">
+    </div>
+    <div class="field">
+      <label for="fpsBottom">Bottom screen frame rate cap <output id="fpsBottomOut"></output></label>
+      <input type="range" id="fpsBottom" min="1" max="60">
+      <p class="hint">Only screens shown in the current layout are sent, so “Top” gives the top screen the whole 3DS.</p>
+    </div>
+    <label class="check"><input type="checkbox" id="sharp"> Sharp colour (better small text, more data)</label>
+    <label class="check" id="boostRow" hidden><input type="checkbox" id="boost"> New 3DS speed boost (804 MHz)</label>
+
+    <h3>This window</h3>
+    <label class="check"><input type="checkbox" id="smooth"> Smooth scaling</label>
+    <label class="check"><input type="checkbox" id="integer"> Pixel-perfect scaling</label>
+    <label class="check"><input type="checkbox" id="statsToggle"> Show stats</label>
+    <div style="margin-top:10px"><button class="btn" id="shotBtn">Save screenshot</button></div>
+
+    <h3>Discord</h3>
+    <p class="hint" style="font-size:13.5px">Click <b>Pop out</b>, then in Discord choose <b>Share Screen</b> and pick the window named <b>3DSLink (pop-out)</b>. The pop-out shows only the screens. Double-click it for fullscreen.</p>
+
+    <h3>Your 3DS</h3>
+    <dl class="info" id="info"><dt>Status</dt><dd>Waiting…</dd></dl>
+    <p class="hint"><a href="api/log" target="_blank" rel="noopener">View service log</a></p>
+
+    <h3>Keyboard</h3>
+    <div class="keys">
+      <span><kbd>1</kbd>–<kbd>4</kbd></span><span>Layouts</span>
+      <span><kbd>F</kbd></span><span>Fullscreen (or double-click)</span>
+      <span><kbd>P</kbd></span><span>Pop out</span>
+      <span><kbd>H</kbd></span><span>Hide / show controls</span>
+      <span><kbd>S</kbd></span><span>Smooth scaling</span>
+    </div>
+  </aside>
+</main>
+
 <script>
-const statusEl=document.getElementById('status'),topCanvas=document.getElementById('top'),bottomCanvas=document.getElementById('bottom');
-const topCtx=topCanvas.getContext('2d'),bottomCtx=bottomCanvas.getContext('2d');
-const topBack=document.createElement('canvas'),bottomBack=document.createElement('canvas');topBack.width=400;topBack.height=240;bottomBack.width=320;bottomBack.height=240;
-const topBackCtx=topBack.getContext('2d'),bottomBackCtx=bottomBack.getContext('2d');
-let streamMode='both',controller=null,generation=0,topFrames=0,bottomFrames=0,lastStat=performance.now();
-const buffers=[{parts:0,strips:[],mask:0},{parts:0,strips:[],mask:0}],chains=[Promise.resolve(),Promise.resolve()],popups=[];
+"use strict";
+(() => {
+const params = new URLSearchParams(location.search);
+const isPopout = params.has("popout");
+// ?host=1.2.3.4:8080 lets a copy of this page opened elsewhere talk to a 3DS.
+const base = params.get("host") ? "http://" + params.get("host") : "";
+const $ = (id) => document.getElementById(id);
 
-function setMode(mode){const s=document.getElementById('shell');s.className='shell';if(mode!=='shell')s.classList.add(mode);const want=mode==='toponly'?'top':'both';if(want!==streamMode){streamMode=want;connect()}}
-function paintStrip(ctx,canvas,part,parts,img){const w=canvas.width/parts,x=(parts-1-part)*w;ctx.save();ctx.translate(x,canvas.height);ctx.rotate(-Math.PI/2);ctx.drawImage(img,0,0,canvas.height,w);ctx.restore()}
+const GAP = 6;
+const LAYOUTS = {
+  stack:  { w: 400, h: 480 + GAP, items: { top: [0, 0], bottom: [40, 240 + GAP] } },
+  side:   { w: 720 + GAP, h: 240, items: { top: [0, 0], bottom: [400 + GAP, 0] } },
+  top:    { w: 400, h: 240, items: { top: [0, 0] } },
+  bottom: { w: 320, h: 240, items: { bottom: [0, 0] } },
+};
+const SIZE = { top: [400, 240], bottom: [320, 240] };
 
-function pop(which){
- const w=which==='both'?760:(which==='top'?800:640),h=which==='both'?900:520,p=window.open('about:blank','3DSLink-'+which,`popup=yes,width=${w},height=${h}`);if(!p)return;
- const st=which!=='bottom',sb=which!=='top';p.document.open();p.document.write(`<!doctype html><html><head><title>3DSLink</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}body{display:flex;flex-direction:column;align-items:center;justify-content:center}canvas{display:block;background:#000;max-width:100%;flex:1;min-height:0}${which==='both'?'#pt{width:min(100%,800px)}#pb{width:min(80%,640px)}':'canvas{width:100%;height:100%}'}</style></head><body>${st?'<canvas id="pt" width="400" height="240"></canvas>':''}${sb?'<canvas id="pb" width="320" height="240"></canvas>':''}<script>const B=[{p:0,s:[],m:0},{p:0,s:[],m:0}],Q=[Promise.resolve(),Promise.resolve()],H=[];function ps(x,c,p,n,i){const w=c.width/n,dx=(n-1-p)*w;x.save();x.translate(dx,c.height);x.rotate(-Math.PI/2);x.drawImage(i,0,0,c.height,w);x.restore()}function hidden(s,c){if(!H[s]){H[s]=document.createElement('canvas');H[s].width=c.width;H[s].height=c.height}return H[s]}async function d(s,p,n,j){const c=s===0?document.getElementById('pt'):document.getElementById('pb');if(!c)return;const i=await createImageBitmap(new Blob([j],{type:'image/jpeg'})),b=B[s];if(p===0||b.p!==n){for(const q of b.s)if(q&&q.close)q.close();b.p=n;b.s=new Array(n);b.m=0}b.s[p]=i;b.m|=1<<p;if(b.m===((1<<n)-1)){const h=hidden(s,c),hx=h.getContext('2d'),x=c.getContext('2d');hx.clearRect(0,0,h.width,h.height);for(let k=0;k<n;k++){ps(hx,h,k,n,b.s[k]);b.s[k].close();b.s[k]=null}x.clearRect(0,0,c.width,c.height);x.drawImage(h,0,0);b.m=0}}addEventListener('message',e=>{const m=e.data;if(m&&m.k==='s')Q[m.s]=Q[m.s].then(()=>d(m.s,m.p,m.n,m.j)).catch(()=>{})});<\/script></body></html>`);p.document.close();popups.push(p)
+/* ---------- viewer preferences (this browser only) ---------- */
+const prefs = { layout: "stack", smooth: false, integer: false, stats: false, clean: false };
+try { Object.assign(prefs, JSON.parse(localStorage.getItem("3dslink") || "{}")); } catch (e) {}
+if (params.get("layout") in LAYOUTS) prefs.layout = params.get("layout");
+if (!(prefs.layout in LAYOUTS)) prefs.layout = "stack";
+function savePrefs() {
+  if (isPopout) return;
+  try { localStorage.setItem("3dslink", JSON.stringify(prefs)); } catch (e) {}
 }
 
-async function decodeStrip(screen,part,parts,jpg){
- const img=await createImageBitmap(new Blob([jpg],{type:'image/jpeg'})),b=buffers[screen];
- if(part===0||b.parts!==parts){for(const old of b.strips)if(old&&old.close)old.close();b.parts=parts;b.strips=new Array(parts);b.mask=0}
- b.strips[part]=img;b.mask|=1<<part;
- for(let i=popups.length-1;i>=0;i--){if(popups[i].closed){popups.splice(i,1);continue}try{popups[i].postMessage({k:'s',s:screen,p:part,n:parts,j:jpg},'*')}catch(e){}}
- if(b.mask===((1<<parts)-1)){
-   const frontCtx=screen===0?topCtx:bottomCtx,front=screen===0?topCanvas:bottomCanvas,backCtx=screen===0?topBackCtx:bottomBackCtx,back=screen===0?topBack:bottomBack;
-   backCtx.clearRect(0,0,back.width,back.height);
-   for(let p=0;p<parts;p++){paintStrip(backCtx,back,p,parts,b.strips[p]);b.strips[p].close();b.strips[p]=null}
-   frontCtx.clearRect(0,0,front.width,front.height);frontCtx.drawImage(back,0,0);b.mask=0;
-   if(screen===0)topFrames++;else bottomFrames++;
- }
- const now=performance.now();if(now-lastStat>1000){statusEl.textContent=`Live • top ${topFrames} fps${streamMode==='both'?` • bottom ${bottomFrames} fps`:''}`;topFrames=bottomFrames=0;lastStat=now}
+/* ---------- screens ---------- */
+const screens = {};
+for (const name of ["top", "bottom"]) {
+  const canvas = $(name);
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  screens[name] = { name, canvas, ctx, busy: false, pending: null, frames: 0, bytes: 0, fps: 0, kbps: 0, got: false };
 }
 
-function connect(){
- generation++;const myGen=generation;if(controller)controller.abort();controller=new AbortController();statusEl.textContent='Connecting to 3DS…';
- (async()=>{try{const path=streamMode==='top'?'/stream?screen=top':'/stream?screen=both',res=await fetch(path,{cache:'no-store',signal:controller.signal});if(!res.ok||!res.body)throw Error('stream');statusEl.textContent='Live';const r=res.body.getReader();let buf=new Uint8Array(0);for(;;){const {value,done}=await r.read();if(done)throw Error('closed');const n=new Uint8Array(buf.length+value.length);n.set(buf);n.set(value,buf.length);buf=n;for(;;){if(buf.length<12)break;if(buf[0]!==0x33||buf[1]!==0x44||buf[2]!==0x53||buf[3]!==0x4c){buf=buf.slice(1);continue}const s=buf[4],p=buf[5],parts=buf[6],len=((buf[8]<<24)>>>0)|(buf[9]<<16)|(buf[10]<<8)|buf[11];if(buf.length<12+len)break;const jpg=buf.slice(12,12+len);buf=buf.slice(12+len);chains[s]=chains[s].then(()=>decodeStrip(s,p,parts,jpg)).catch(()=>{})}}}catch(e){if(myGen!==generation)return;statusEl.textContent='Disconnected — retrying…';setTimeout(()=>{if(myGen===generation)connect()},800)}})()
+function draw(s, bmp) {
+  const ctx = s.ctx;
+  if (bmp.width === s.canvas.height && bmp.height === s.canvas.width) {
+    // Frames arrive in the 3DS's native sideways orientation; turn them upright.
+    ctx.setTransform(0, -1, 1, 0, 0, s.canvas.height);
+    ctx.drawImage(bmp, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  } else {
+    ctx.drawImage(bmp, 0, 0, s.canvas.width, s.canvas.height);
+  }
 }
-connect();
-</script></body></html>
+
+async function decode(s, jpeg) {
+  s.busy = true;
+  try {
+    const bmp = await createImageBitmap(new Blob([jpeg], { type: "image/jpeg" }));
+    draw(s, bmp);
+    bmp.close();
+    s.frames++;
+    if (!s.got) { s.got = true; updateNotice(); }
+  } catch (e) { /* a damaged frame: skip it */ }
+  s.busy = false;
+  if (s.pending) {
+    const next = s.pending;
+    s.pending = null;
+    decode(s, next);
+  }
+}
+
+function onPart(headers, body) {
+  const s = screens[headers["x-screen"]];
+  if (!s || !(headers["content-type"] || "").startsWith("image/")) return; // keep-alive parts
+  s.bytes += body.length;
+  // Never queue more than one frame: if decoding falls behind, show the newest.
+  if (s.busy) s.pending = body;
+  else decode(s, body);
+}
+
+/* ---------- multipart/x-mixed-replace parser ---------- */
+const latin1 = new TextDecoder("latin1");
+class PartParser {
+  constructor(cb) { this.cb = cb; this.buf = new Uint8Array(0); this.need = -1; this.headers = null; }
+  push(chunk) {
+    if (this.buf.length === 0) this.buf = chunk;
+    else {
+      const b = new Uint8Array(this.buf.length + chunk.length);
+      b.set(this.buf); b.set(chunk, this.buf.length);
+      this.buf = b;
+    }
+    const buf = this.buf;
+    let off = 0;
+    for (;;) {
+      if (this.need < 0) {
+        const end = findHeaderEnd(buf, off);
+        if (end < 0) {
+          if (buf.length - off > 8192) off = buf.length; // garbage, resync
+          break;
+        }
+        const headers = {};
+        for (const line of latin1.decode(buf.subarray(off, end)).split("\r\n")) {
+          const i = line.indexOf(":");
+          if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+        }
+        this.headers = headers;
+        this.need = Math.max(0, parseInt(headers["content-length"], 10) || 0);
+        off = end + 4;
+      }
+      if (buf.length - off < this.need) break;
+      const body = buf.slice(off, off + this.need);
+      off += this.need;
+      const headers = this.headers;
+      this.need = -1;
+      this.headers = null;
+      this.cb(headers, body);
+    }
+    this.buf = off >= buf.length ? new Uint8Array(0) : off ? buf.slice(off) : buf;
+  }
+}
+function findHeaderEnd(b, from) {
+  for (let i = from; i + 3 < b.length; i++)
+    if (b[i] === 13 && b[i + 1] === 10 && b[i + 2] === 13 && b[i + 3] === 10) return i;
+  return -1;
+}
+
+/* ---------- connection ---------- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let gen = 0, ctrl = null, state = "connecting", stateDetail = "", wantScreens = "";
+
+function setState(st, detail = "") {
+  state = st;
+  stateDetail = detail;
+  updateNotice();
+  updateStatus();
+}
+
+async function connectLoop(myGen, screensParam) {
+  let delay = 400;
+  while (myGen === gen) {
+    setState("connecting");
+    const c = new AbortController();
+    ctrl = c;
+    let watchdog = 0;
+    try {
+      const res = await fetch(base + "/stream?screens=" + screensParam, { cache: "no-store", signal: c.signal });
+      if (res.status === 503) throw new Error("busy");
+      if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+      const reader = res.body.getReader();
+      const parser = new PartParser(onPart);
+      let last = performance.now();
+      // The 3DS sends a keep-alive every couple of seconds, so silence means the link died.
+      watchdog = setInterval(() => { if (performance.now() - last > 7000) c.abort(); }, 1000);
+      setState("live");
+      delay = 400;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        last = performance.now();
+        parser.push(value);
+      }
+    } catch (e) {
+      if (myGen !== gen) return;
+      if (e && e.message === "busy") stateDetail = "busy";
+    } finally {
+      clearInterval(watchdog);
+    }
+    if (myGen !== gen) return;
+    setState("retry", stateDetail);
+    await sleep(delay);
+    delay = Math.min(delay * 2, 4000);
+  }
+}
+
+function neededScreens() {
+  return Object.keys(LAYOUTS[prefs.layout].items).join(",");
+}
+
+function connect(force) {
+  const need = neededScreens();
+  if (!force && need === wantScreens && ctrl) return;
+  stopStream();
+  wantScreens = need;
+  connectLoop(gen, need);
+}
+
+function stopStream() {
+  gen++;
+  if (ctrl) ctrl.abort();
+  ctrl = null;
+  wantScreens = "";
+}
+
+/* ---------- layout ---------- */
+function applyLayout() {
+  const L = LAYOUTS[prefs.layout];
+  const stage = $("stage").getBoundingClientRect();
+  const pad = document.body.classList.contains("clean") || document.fullscreenElement ? 0 : 16;
+  let scale = Math.min((stage.width - pad * 2) / L.w, (stage.height - pad * 2) / L.h);
+  if (prefs.integer && scale >= 1) scale = Math.floor(scale);
+  scale = Math.max(scale, 0.1);
+  const box = $("box");
+  box.style.width = L.w * scale + "px";
+  box.style.height = L.h * scale + "px";
+  box.style.left = (stage.width - L.w * scale) / 2 + "px";
+  box.style.top = (stage.height - L.h * scale) / 2 + "px";
+  for (const name of ["top", "bottom"]) {
+    const c = screens[name].canvas, pos = L.items[name];
+    c.style.display = pos ? "block" : "none";
+    if (!pos) continue;
+    c.style.left = pos[0] * scale + "px";
+    c.style.top = pos[1] * scale + "px";
+    c.style.width = SIZE[name][0] * scale + "px";
+    c.style.height = SIZE[name][1] * scale + "px";
+  }
+  for (const b of $("layouts").querySelectorAll("button"))
+    b.setAttribute("aria-pressed", String(b.dataset.layout === prefs.layout));
+  document.body.classList.toggle("smooth", prefs.smooth);
+  document.body.classList.toggle("show-stats", prefs.stats);
+}
+
+function setLayout(name) {
+  if (!(name in LAYOUTS)) return;
+  prefs.layout = name;
+  savePrefs();
+  applyLayout();
+  if (!popoutActive) connect(false);
+  for (const s of Object.values(screens)) s.got = false;
+  updateNotice();
+}
+
+/* ---------- notices + status ---------- */
+function updateNotice() {
+  const n = $("notice"), actions = $("noticeActions");
+  actions.textContent = "";
+  let title = "", text = "";
+  if (popoutActive) {
+    title = "Showing in the pop-out window";
+    text = "This tab pauses its own stream so the 3DS only sends one copy.";
+    addAction("Bring it back here", () => channel && channel.postMessage({ t: "close" }), true);
+  } else if (state === "live") {
+    const visible = Object.keys(LAYOUTS[prefs.layout].items);
+    if (!visible.some((v) => screens[v].got)) { title = "Connected"; text = "Waiting for the first frame…"; }
+  } else if (stateDetail === "busy") {
+    title = "Too many viewers";
+    text = "Another window is already watching this 3DS. Close it, then this page reconnects by itself.";
+  } else {
+    title = state === "retry" ? "Can't reach the 3DS — retrying…" : "Connecting to your 3DS…";
+    text = "Open 3DSLink on the 3DS first. Keep it awake and on the same Wi-Fi as this computer.";
+  }
+  $("noticeTitle").textContent = title;
+  $("noticeText").textContent = text;
+  n.classList.toggle("show", !!title);
+}
+function addAction(label, fn, primary) {
+  const b = document.createElement("button");
+  b.className = "btn" + (primary ? " primary" : "");
+  b.textContent = label;
+  b.onclick = fn;
+  $("noticeActions").appendChild(b);
+}
+
+function updateStatus() {
+  const el = $("status");
+  el.classList.toggle("live", state === "live" && !popoutActive);
+  el.classList.toggle("off", state === "retry");
+  let text = popoutActive ? "In pop-out" : state === "live" ? "Live" : state === "retry" ? "Offline" : "Connecting…";
+  if (state === "live" && !popoutActive) {
+    const parts = Object.keys(LAYOUTS[prefs.layout].items).map((n) => Math.round(screens[n].fps) + " fps");
+    text += " · " + parts.join(" / ");
+  }
+  $("statusText").textContent = text;
+}
+
+let remote = null;
+function updateStats() {
+  const lines = [];
+  for (const s of Object.values(screens)) {
+    if (!(s.name in LAYOUTS[prefs.layout].items)) continue;
+    let line = `${s.name.padEnd(6)} ${s.fps.toFixed(1).padStart(4)} fps  ${(s.kbps / 1000).toFixed(2)} Mbit/s`;
+    const r = remote && remote.screens && remote.screens[s.name];
+    if (r) line += `  encode ${r.encode_ms} ms  q${r.quality}  ${r.format}${r.static ? "  (still)" : ""}`;
+    lines.push(line);
+  }
+  $("stats").textContent = lines.join("\n");
+}
+
+setInterval(() => {
+  for (const s of Object.values(screens)) {
+    s.fps = s.fps * 0.4 + s.frames * 0.6;
+    s.kbps = s.kbps * 0.4 + s.bytes * 8 / 1000 * 0.6;
+    s.frames = 0;
+    s.bytes = 0;
+  }
+  updateStatus();
+  updateStats();
+}, 1000);
+
+/* ---------- 3DS status + settings ---------- */
+const remoteFields = {
+  quality: ["quality", "qualityOut", (v) => v],
+  fpsTop: ["fps_top", "fpsTopOut", (v) => v + " fps"],
+  fpsBottom: ["fps_bottom", "fpsBottomOut", (v) => v + " fps"],
+};
+let editingUntil = 0;
+
+function showRemoteSettings(st) {
+  if (performance.now() < editingUntil) return;
+  for (const [id, [key, out, fmt]] of Object.entries(remoteFields)) {
+    $(id).value = st[key];
+    $(out).textContent = fmt(st[key]);
+  }
+  $("sharp").checked = !!st.sharp;
+  $("boost").checked = !!st.boost;
+  $("boostRow").hidden = !st.boost_supported;
+}
+
+async function pollStatus() {
+  if (isPopout || document.hidden) return;
+  try {
+    const r = await fetch(base + "/api/status", { cache: "no-store" });
+    remote = await r.json();
+    showRemoteSettings(remote.settings);
+    const up = remote.uptime, h = Math.floor(up / 3600), m = Math.floor(up / 60) % 60;
+    const rows = [
+      ["Model", remote.model], ["Address", remote.ip ? `http://${remote.ip}:${location.port || 8080}/` : "–"],
+      ["Service", "v" + remote.version], ["Running for", h ? `${h} h ${m} min` : `${m} min`],
+      ["Viewers", remote.streams],
+    ];
+    for (const n of ["top", "bottom"]) {
+      const e = remote.screens[n].error;
+      if (e) rows.push([n === "top" ? "Top screen" : "Bottom screen", e]);
+    }
+    const dl = $("info");
+    dl.textContent = "";
+    for (const [k, v] of rows) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd");
+      dt.textContent = k; dd.textContent = v;
+      dl.append(dt, dd);
+    }
+  } catch (e) { remote = null; }
+}
+setInterval(pollStatus, 2000);
+
+let pushTimer = 0;
+function pushSettings() {
+  editingUntil = performance.now() + 1500;
+  for (const [id, [, out, fmt]] of Object.entries(remoteFields)) $(out).textContent = fmt($(id).value);
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(async () => {
+    const q = new URLSearchParams({
+      quality: $("quality").value, fps_top: $("fpsTop").value, fps_bottom: $("fpsBottom").value,
+      sharp: $("sharp").checked ? 1 : 0, boost: $("boost").checked ? 1 : 0,
+    });
+    try { await fetch(base + "/api/settings?" + q, { cache: "no-store" }); } catch (e) {}
+  }, 250);
+}
+for (const id of ["quality", "fpsTop", "fpsBottom"]) $(id).addEventListener("input", pushSettings);
+for (const id of ["sharp", "boost"]) $(id).addEventListener("change", pushSettings);
+
+/* ---------- pop-out window ---------- */
+const channel = "BroadcastChannel" in window ? new BroadcastChannel("3dslink") : null;
+let popoutActive = false, lastPing = 0, popupRef = null;
+
+if (isPopout) {
+  document.title = "3DSLink (pop-out)";
+  document.body.classList.add("clean", "popout");
+  if (channel) {
+    const ping = () => channel.postMessage({ t: "ping" });
+    ping();
+    setInterval(ping, 1000);
+    addEventListener("pagehide", () => channel.postMessage({ t: "bye" }));
+    channel.onmessage = (e) => { if (e.data && e.data.t === "close") window.close(); };
+  }
+} else if (channel) {
+  channel.onmessage = (e) => {
+    if (!e.data) return;
+    if (e.data.t === "ping") lastPing = performance.now();
+    if (e.data.t === "bye") lastPing = 0;
+    checkPopout();
+  };
+  setInterval(checkPopout, 1000);
+}
+
+function checkPopout() {
+  const active = lastPing > 0 && performance.now() - lastPing < 2500;
+  if (active === popoutActive) return;
+  popoutActive = active;
+  if (active) {
+    stopStream();
+    setState("connecting");
+  } else {
+    connect(true);
+  }
+  updateNotice();
+  updateStatus();
+}
+
+function openPopout() {
+  const L = LAYOUTS[prefs.layout];
+  let s = Math.min(screen.availWidth * 0.9 / L.w, screen.availHeight * 0.82 / L.h);
+  s = s >= 1 ? Math.floor(s * 2) / 2 : s;
+  const w = Math.round(L.w * s), h = Math.round(L.h * s);
+  const url = "?popout=1&layout=" + prefs.layout + (params.get("host") ? "&host=" + encodeURIComponent(params.get("host")) : "");
+  popupRef = window.open(url, "3dslink-popout", `popup=yes,width=${w},height=${h}`);
+  if (popupRef) popupRef.focus();
+}
+
+/* ---------- controls ---------- */
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+}
+function setClean(on) {
+  if (isPopout) return;
+  prefs.clean = on;
+  savePrefs();
+  document.body.classList.toggle("clean", on);
+  applyLayout();
+}
+function toggleSettings(open) {
+  const a = $("settings");
+  open = open === undefined ? !a.classList.contains("open") : open;
+  a.classList.toggle("open", open);
+  $("settingsBtn").setAttribute("aria-expanded", String(open));
+  if (open) pollStatus();
+}
+function screenshot() {
+  const L = LAYOUTS[prefs.layout];
+  const c = document.createElement("canvas");
+  c.width = L.w; c.height = L.h;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, L.w, L.h);
+  for (const [name, [x, y]] of Object.entries(L.items)) ctx.drawImage(screens[name].canvas, x, y);
+  c.toBlob((blob) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "3dslink-" + new Date().toISOString().replace(/[:T]/g, "-").slice(0, 19) + ".png";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }, "image/png");
+}
+
+$("layouts").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setLayout(b.dataset.layout); });
+$("popoutBtn").onclick = openPopout;
+$("fullBtn").onclick = toggleFullscreen;
+$("cleanBtn").onclick = () => setClean(true);
+$("showControls").onclick = () => setClean(false);
+$("settingsBtn").onclick = () => toggleSettings();
+$("closeSettings").onclick = () => toggleSettings(false);
+$("shotBtn").onclick = screenshot;
+$("stage").addEventListener("dblclick", (e) => { if (!e.target.closest("aside, button")) toggleFullscreen(); });
+for (const id of ["smooth", "integer"]) {
+  $(id).checked = prefs[id];
+  $(id).onchange = () => { prefs[id] = $(id).checked; savePrefs(); applyLayout(); };
+}
+$("statsToggle").checked = prefs.stats;
+$("statsToggle").onchange = () => { prefs.stats = $("statsToggle").checked; savePrefs(); applyLayout(); };
+
+addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey || e.target.matches("input")) return;
+  const k = e.key.toLowerCase();
+  if (k >= "1" && k <= "4") setLayout(["stack", "side", "top", "bottom"][k - 1]);
+  else if (k === "f") toggleFullscreen();
+  else if (k === "p" && !isPopout) openPopout();
+  else if (k === "h") setClean(!document.body.classList.contains("clean"));
+  else if (k === "s") { prefs.smooth = !prefs.smooth; $("smooth").checked = prefs.smooth; savePrefs(); applyLayout(); }
+  else if (k === "escape") toggleSettings(false);
+  else return;
+  e.preventDefault();
+});
+
+let mouseTimer = 0;
+addEventListener("mousemove", () => {
+  document.body.classList.add("mouse");
+  clearTimeout(mouseTimer);
+  mouseTimer = setTimeout(() => document.body.classList.remove("mouse"), 1800);
+});
+
+new ResizeObserver(applyLayout).observe($("stage"));
+document.addEventListener("fullscreenchange", applyLayout);
+
+if (prefs.clean && !isPopout) document.body.classList.add("clean");
+applyLayout();
+updateNotice();
+connect(true);
+pollStatus();
+})();
+</script>
+</body>
+</html>
